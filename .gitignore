@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.db
+*.egg-info/
+.eggs/
+
+# 本地配置（不提交 Git）
+.cookie
+voicetofile.db
+
+# 临时文件
+*.tmp
+*.log
+_audio_progress_*.txt
+_audio_result_*.json
+_download_progress_*.txt
+_download_result_*.json
+_transcribe_progress_*.txt
+_transcribe_result_*.json
+
+# ffmpeg（从 b-site 共享）
+ffmpeg/
+
+# 输出文件
+F:/outfile/
+
+# IDE
+.vscode/
+.idea/
+*.swp
