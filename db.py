@@ -2,6 +2,7 @@
 SQLite 数据库模块
 VoicToFile — 小宇宙播客转文字
 """
+import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -74,6 +75,15 @@ def init_db():
 
 
 # --------------- Podcasts ---------------
+
+MANUAL_PID = "__manual__"
+MANUAL_NAME = "精选播客"
+
+
+def get_or_create_manual_podcast() -> int:
+    """获取或创建"精选播客"虚拟播客，用于存放手动添加的单集"""
+    return add_podcast(MANUAL_PID, MANUAL_NAME)
+
 
 def add_podcast(pid: str, name: str) -> int:
     """添加播客，如已存在则更新名称，返回 podcast_id"""
@@ -248,6 +258,65 @@ def reset_episode_for_retry(episode_id: int):
     update_episode_status(episode_id, "pending", txt_path="", error_msg="")
 
 
+def sync_episode_txt_status(episode_id: int) -> bool:
+    """
+    检查 episode 的 txt 文件是否真实存在。
+    如果 status=done_deleted 但文件不存在，或 status=transcribing 但无文件，自动重置为 pending。
+    返回 True if status was changed.
+    """
+    ep = get_episode_by_id(episode_id)
+    if not ep:
+        return False
+    txt = ep.get("txt_path") or ""
+    txt_exists = bool(txt) and os.path.exists(txt)
+
+    changed = False
+    if ep["status"] == "transcribing" and not txt_exists:
+        # 僵尸状态（进程崩溃遗留），重置
+        update_episode_status(episode_id, "pending", txt_path="", error_msg="")
+        changed = True
+    elif ep["status"] == "done_deleted" and not txt_exists:
+        # 文件被删了，重置为 pending 可重新转
+        update_episode_status(episode_id, "pending", txt_path="", error_msg="")
+        changed = True
+    return changed
+
+
+def sync_podcast_episodes_status(podcast_id: int) -> int:
+    """
+    对某播客下所有 episode 检查文件存在性并修正状态。
+    返回修正的 episode 数量。
+    """
+    episodes = list_episodes_by_podcast(podcast_id)
+    count = 0
+    for ep in episodes:
+        if sync_episode_txt_status(ep["id"]):
+            count += 1
+    return count
+
+
+def cleanup_all_zombie_episodes() -> int:
+    """
+    全局清理：所有 status=transcribing 且无 txt_path 的 episode 重置为 pending。
+    返回清理数量。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE episodes
+            SET status = 'pending', txt_path = '', error_msg = '', updated_at = ?
+            WHERE status = 'transcribing'
+            AND (txt_path IS NULL OR txt_path = '' OR NOT EXISTS (
+                SELECT 1 FROM episodes e2 WHERE e2.id = episodes.id AND e2.txt_path IS NOT NULL AND e2.txt_path != ''
+            ))
+        """, (datetime.now().isoformat(),))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def get_active_episodes() -> list[dict]:
     """获取所有 pending/downloading/transcribing/failed 状态的 episodes"""
     conn = get_conn()
@@ -309,7 +378,10 @@ def list_manual_episodes() -> list[dict]:
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
-    """获取所有 pending/downloading/transcribing/failed 状态的 episodes"""
+
+
+def get_recently_completed_episodes(limit: int = 20) -> list[dict]:
+    """获取最近完成/失败的任务（done_deleted 或 failed），按完成时间倒序，最多 limit 条"""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -317,9 +389,28 @@ def list_manual_episodes() -> list[dict]:
             SELECT e.*, p.name as podcast_name
             FROM episodes e
             JOIN podcasts p ON e.podcast_id = p.id
-            WHERE e.status NOT IN ('done_deleted')
+            WHERE e.status IN ('done_deleted', 'failed')
+            ORDER BY e.updated_at DESC
+            LIMIT ?
+        """, (limit,))
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_pending_episodes(limit: int = 50) -> list[dict]:
+    """获取所有排队中的任务（pending），按加入时间升序"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT e.*, p.name as podcast_name
+            FROM episodes e
+            JOIN podcasts p ON e.podcast_id = p.id
+            WHERE e.status = 'queued'
             ORDER BY e.created_at ASC
-        """)
+            LIMIT ?
+        """, (limit,))
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()

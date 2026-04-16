@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>处理队列 - VoiceToFile</title>
+  <style>
+    :root {
+      --primary: #3b82f6;
+      --green: #22c55e;
+      --orange: #f59e0b;
+      --red: #ef4444;
+      --purple: #7c3aed;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --text-secondary: #64748b;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; }
+    .container { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 18px; margin-bottom: 20px; }
+    .back-btn { display: inline-block; margin-bottom: 16px; color: var(--primary); text-decoration: none; font-size: 14px; }
+    .back-btn:hover { text-decoration: underline; }
+
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; }
+    .card-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+    .progress-bar { height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
+    .progress-fill { height: 100%; background: var(--primary); border-radius: 4px; transition: width 0.3s; }
+    .status-text { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; min-height: 16px; }
+    .meta { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); }
+    .status { font-weight: 500; }
+    .status-downloading { color: #1e40af; }
+    .status-transcribing { color: var(--purple); }
+    .status-pending { color: var(--orange); }
+    .status-done { color: var(--green); }
+    .status-failed { color: var(--red); }
+
+    .item { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px; }
+    .item-name { font-size: 14px; flex: 1; }
+    .item-sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .tag { font-size: 12px; padding: 3px 10px; border-radius: 12px; font-weight: 500; }
+    .tag-pending { background: #fef3c7; color: #92400e; }
+    .tag-done { background: #dcfce7; color: #166534; }
+    .tag-failed { background: #fee2e2; color: #991b1b; }
+    .remove-btn { font-size: 12px; padding: 3px 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text-secondary); cursor: pointer; flex-shrink: 0; text-decoration: none; display: inline-block; }
+    .remove-btn:hover { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+    .stop-btn { font-size: 12px; padding: 3px 10px; border-radius: 12px; border: 1px solid var(--red); background: var(--card); color: var(--red); cursor: pointer; flex-shrink: 0; text-decoration: none; display: inline-block; }
+    .stop-btn:hover { background: #fee2e2; }
+
+    .section-title { font-size: 13px; color: var(--text-secondary); margin: 20px 0 10px; }
+    .empty { text-align: center; padding: 40px; color: var(--text-secondary); }
+    .更新时间 { font-size: 12px; color: var(--text-secondary); margin-top: 20px; text-align: center; }
+    .spin-icon { display: inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="container">
+  <a class="back-btn" href="javascript:window.close()">✕ 关闭</a>
+  <h1>📋 处理队列</h1>
+
+  <!-- 正在处理 -->
+  <div id="current-area">
+    <div class="card"><div class="empty">加载中...</div></div>
+  </div>
+
+  <!-- 排队中 -->
+  <div id="queue-area"></div>
+
+  <!-- 已完成 -->
+  <div id="done-area"></div>
+
+  <div class="更新时间" id="update-time"></div>
+</div>
+
+<script>
+// ---- SSE 实时更新 ----
+const evtSource = new EventSource('/sse/stream');
+
+function formatElapsed(seconds) {
+  if (!seconds) return '0秒';
+  if (seconds < 60) return Math.round(seconds) + '秒';
+  return Math.round(seconds / 60) + '分' + (Math.round(seconds % 60)) + '秒';
+}
+
+function renderTaskCard(task, showStop) {
+  const isDownloading = task.status === 'downloading';
+  const isTranscribing = task.status === 'transcribing';
+  const statusLabel = isDownloading ? '音频下载中' : '音频转文字中';
+  const statusClass = isDownloading ? 'status-downloading' : 'status-transcribing';
+  const progress = task.progress || 0;
+  const elapsed = formatElapsed(task.elapsed || 0);
+  const stopLink = showStop
+    ? `<a href="/api/queue/stop?episode_id=${task.episode_id}" class="stop-btn" onclick="return confirm('确定要终止当前任务吗？')">终止任务</a>`
+    : '';
+  return `
+    <div class="card">
+      <div class="card-title">🎧 ${task.podcast_name} — ${task.name}</div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
+      <div class="status-text">${statusLabel} ${progress}%</div>
+      <div class="meta">
+        <span class="status ${statusClass}">${statusLabel}</span>
+        <span>${progress}%</span>
+        <span>已耗时 ${elapsed}</span>
+        ${stopLink}
+      </div>
+    </div>`;
+}
+
+function renderItem(ep, isQueue) {
+  const isDone = ep.status === 'done_deleted';
+  const isFailed = ep.status === 'failed';
+  const tagClass = isDone ? 'tag-done' : 'tag-failed';
+  const tagText = isDone ? '已完成' : '失败';
+  const stopLink = isQueue
+    ? `<form method="POST" style="display:inline;">
+         <input type="hidden" name="episode_id" value="${ep.episode_id || ep.id}">
+         <button type="submit" class="remove-btn">移除</button>
+       </form>`
+    : '';
+  return `
+    <div class="item">
+      <div class="item-name">${ep.podcast_name} — ${ep.name}</div>
+      ${stopLink}
+      <span class="tag ${tagClass}">${isQueue ? '排队中' : tagText}</span>
+    </div>`;
+}
+
+function updateQueueUI(tasks) {
+  // 正在处理
+  const active = tasks.filter(t => t.status === 'downloading' || t.status === 'transcribing');
+  const currentArea = document.getElementById('current-area');
+  if (active.length > 0) {
+    currentArea.innerHTML = active.map(t => renderTaskCard(t, true)).join('');
+  } else {
+    currentArea.innerHTML = '<div class="card"><div class="empty">暂无正在处理的任务</div></div>';
+  }
+
+  // 排队中：只看 DB 的 queued 任务（task_queue 里的任务正在被 worker 处理，不重复显示）
+  const queued = tasks.filter(t => t.status === 'queued');
+  const queueArea = document.getElementById('queue-area');
+  if (queued.length > 0) {
+    queueArea.innerHTML = `<div class="section-title">排队中（${queued.length} 个）</div>` + queued.map(t => renderItem(t, true)).join('');
+  } else {
+    queueArea.innerHTML = '';
+  }
+
+  // 已完成：done_deleted 和 failed
+  const done = tasks.filter(t => t.status === 'done_deleted' || t.status === 'failed');
+  const doneArea = document.getElementById('done-area');
+  if (done.length > 0) {
+    doneArea.innerHTML = `<div class="section-title">已完成（${done.length} 个）</div>` + done.map(t => renderItem(t, false)).join('');
+  } else {
+    doneArea.innerHTML = '';
+  }
+
+  document.getElementById('update-time').textContent = '页面自动刷新，每秒更新';
+}
+
+async function loadQueue() {
+  try {
+    const resp = await fetch('/api/queue');
+    const data = await resp.json();
+    // 合并已有缓存（保留 SSE 更新的进度），只用 API 数据补充状态
+    if (!window._cachedTasks) {
+      window._cachedTasks = data.tasks || [];
+    } else {
+      for (const apiTask of (data.tasks || [])) {
+        const idx = window._cachedTasks.findIndex(t => t.eid === apiTask.eid);
+        if (idx >= 0) {
+          // 保留 SSE 更新的进度/时间，只用 API 数据更新状态
+          window._cachedTasks[idx] = {
+            ...window._cachedTasks[idx],
+            status: apiTask.status,
+            status_text: apiTask.status_text,
+            name: apiTask.name,
+            podcast_name: apiTask.podcast_name,
+            episode_id: apiTask.episode_id || apiTask.id,
+          };
+        } else {
+          window._cachedTasks.push(apiTask);
+        }
+      }
+      // 不再移除已完成的任务——它们由 task_done 事件管理，永久保留
+    }
+    updateQueueUI(window._cachedTasks);
+  } catch (e) {
+    console.error('加载队列失败:', e);
+  }
+}
+
+// SSE 任务更新事件：负责实时进度，同时能把不在缓存里的任务加进来（防止漏掉初始化前的任务）
+evtSource.addEventListener('task_update', (e) => {
+  if (!window._cachedTasks) return;
+  const task = JSON.parse(e.data);
+  const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
+  if (idx >= 0) {
+    window._cachedTasks[idx] = { ...window._cachedTasks[idx], ...task };
+  } else {
+    // 不在缓存里，加进来（处理初始化前已存在的 downloading 任务）
+    window._cachedTasks.push(task);
+  }
+  updateQueueUI(window._cachedTasks);
+});
+
+evtSource.addEventListener('task_new', (e) => {
+  if (!window._cachedTasks) return;
+  const task = JSON.parse(e.data);
+  if (!window._cachedTasks.find(t => t.eid === task.eid)) {
+    window._cachedTasks.push(task);
+    updateQueueUI(window._cachedTasks);
+  }
+});
+
+evtSource.addEventListener('task_done', (e) => {
+  if (!window._cachedTasks) return;
+  const task = JSON.parse(e.data);
+  // 只更新任务状态，不要删除（保留在已完成列表里）
+  const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
+  if (idx >= 0) {
+    window._cachedTasks[idx] = { ...window._cachedTasks[idx], status: 'done_deleted' };
+  } else {
+    // 不在缓存里就加进来（处理初始化前已结束的任务）
+    window._cachedTasks.push({ eid: task.eid, name: task.name, podcast_name: task.podcast_name, status: 'done_deleted' });
+  }
+  updateQueueUI(window._cachedTasks);
+});
+
+// 初始化时加载一次
+loadQueue();
+// 每秒轮询刷新（补充 SSE 可能漏掉的任务状态）
+setInterval(loadQueue, 1000);
+</script>
+</body>
+</html>

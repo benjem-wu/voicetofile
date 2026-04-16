@@ -41,6 +41,11 @@ logger = logging.getLogger("app")
 # 任务队列：[{"eid", "name", "podcast_id", "podcast_name", "status", "progress", "elapsed", "error"}]
 task_queue = []
 queue_lock = threading.Lock()
+queue_wakeup = threading.Event()  # 用于唤醒 queue worker
+stop_event = threading.Event()    # 终止当前任务信号
+current_task_thread = None        # 当前处理线程
+current_subprocess = None         # 当前 subprocess 引用（用于 kill）
+_task_terminated = False          # 标记当前任务已被 api_queue_stop 提前终止（避免 finally 重复覆盖）
 
 # SSE 订阅者：{"event": "message", "data": {...}}
 sse_subscribers = []
@@ -122,16 +127,42 @@ def sse_stream():
 @app.route("/")
 def index():
     """主页"""
+    # 确保"精选播客"虚拟播客存在
+    db.get_or_create_manual_podcast()
+
     podcasts_raw = db.list_podcasts()
     active_tasks = db.get_active_episodes()
 
-    # 只显示有订阅来源 episodes 的播客（排除纯手动添加的虚拟播客）
+    # 同步所有播客的文件状态（修正文件已删除但DB状态未改的情况）
+    for p in podcasts_raw:
+        db.sync_podcast_episodes_status(p["id"])
+
+    # 构建播客列表（精选播客置顶，其他按添加时间倒序）
     podcasts = []
+    manual_podcast = None
+
     for p in podcasts_raw:
         episodes = db.list_episodes_by_podcast(p["id"])
+        # 精选播客：显示所有单集（包括手动添加的）
+        if p["pid"] == db.MANUAL_PID:
+            total = len(episodes)
+            done = sum(1 for e in episodes if e["status"] == "done_deleted")
+            latest_pub = ""
+            for e in episodes:
+                if e["pub_date"]:
+                    latest_pub = e["pub_date"]
+                    break
+            manual_podcast = {
+                **p,
+                "total_episodes": total,
+                "done_episodes": done,
+                "latest_pub_date": latest_pub,
+            }
+            continue
+        # 普通播客：至少要有一个 subscribe 来源的集
         sub_eps = [e for e in episodes if e.get("source") == "subscribe"]
         if not sub_eps:
-            continue  # 跳过纯手动播客
+            continue
         total = len(episodes)
         done = sum(1 for e in episodes if e["status"] == "done_deleted")
         latest_pub = ""
@@ -146,18 +177,71 @@ def index():
             "latest_pub_date": latest_pub,
         })
 
-    # 手动添加的单集
-    manual_episodes = db.list_manual_episodes()
+    # 精选播客置顶
+    if manual_podcast:
+        podcasts.insert(0, manual_podcast)
 
     return render_template(
         "new_index.html",
         podcasts=podcasts,
-        manual_episodes=manual_episodes,
         active_tasks=active_tasks,
         output_root=str(OUTPUT_ROOT),
         cookie_interval=COOKIE_INTERVAL,
         now=datetime.now,
     )
+
+
+@app.route("/queue", methods=["GET", "POST"])
+def queue_page():
+    """独立的队列页面（新窗口打开）"""
+    if request.method == "POST":
+        # 移除按钮：恢复为 pending 状态
+        episode_id = request.form.get("episode_id", type=int)
+        if episode_id:
+            ep = db.get_episode_by_id(episode_id)
+            if ep:
+                db.update_episode_status(episode_id, "pending", txt_path="", error_msg="")
+                with queue_lock:
+                    for i, t in enumerate(task_queue):
+                        if t["episode_id"] == episode_id:
+                            task_queue.pop(i)
+                            break
+        return redirect(url_for("queue_page"))
+
+    with queue_lock:
+        all_queue_tasks = list(task_queue)
+    # 正在处理：优先从 task_queue（downloading/transcribing），也查 DB（防止 Flask 重启后丢失）
+    active = [t for t in all_queue_tasks if t.get("status") in ("downloading", "transcribing")]
+    active_eids = {t["eid"] for t in active}
+    # 从 DB 补充正在处理的任务（Flask 重启后 task_queue 为空，但 DB 状态还在）
+    db_active = db.get_conn().execute("""
+        SELECT e.*, p.name as podcast_name
+        FROM episodes e
+        JOIN podcasts p ON e.podcast_id = p.id
+        WHERE e.status IN ('downloading', 'transcribing')
+    """).fetchall()
+    for row in db_active:
+        rd = dict(row)
+        if rd["eid"] not in active_eids:
+            active.append(rd)
+            active_eids.add(rd["eid"])
+    # 排队中：task_queue 里的 pending/queued 任务 + DB 里的 queued 任务
+    in_queue = [t for t in all_queue_tasks if t.get("status") in ("pending", "queued")]
+    all_pending = db.get_pending_episodes()
+    pending = [p for p in all_pending if p["eid"] not in active_eids]
+    done = db.get_recently_completed_episodes(limit=20)
+    return render_template("queue.html", active=active, pending=pending, in_queue=in_queue, done=done)
+
+
+@app.route("/podcast/<int:podcast_id>")
+def podcast_page(podcast_id: int):
+    """独立的播客详情页（新窗口打开）"""
+    podcast = db.get_conn().execute(
+        "SELECT * FROM podcasts WHERE id = ?", (podcast_id,)
+    ).fetchone()
+    if not podcast:
+        return "播客不存在", 404
+    return render_template("podcast.html", podcast=dict(podcast), now=datetime.now)
 
 
 @app.route("/podcast/<int:podcast_id>")
@@ -279,7 +363,7 @@ def api_fetch_podcast():
 @app.route("/api/episode/add", methods=["POST"])
 def api_add_episode():
     """
-    模式B：手动添加单集
+    模式B：手动添加单集（统一归入"精选播客"虚拟播客）
     POST body: {"url": "https://www.xiaoyuzhoufm.com/episode/xxx"}
     """
     data = request.get_json()
@@ -298,17 +382,8 @@ def api_add_episode():
         ep = scraper.fetch_episode_info(eid, interval=COOKIE_INTERVAL)
         addLog(f"[单集] {ep.name}，音频: {ep.audio_url[:40]}...", "done")
 
-        # 如果没有 pid，需要先创建或找一个 podcast 记录
-        podcast_id = None
-        pid = ep.pid
-        if pid:
-            existing = db.get_podcast_by_pid(pid)
-            if existing:
-                podcast_id = existing["id"]
-
-        # 如果找不到 podcast，创建一个虚拟记录
-        if not podcast_id:
-            podcast_id = db.add_podcast(pid or eid, ep.name.split()[0] if ep.name else "单集")
+        # 强制使用"精选播客"虚拟播客
+        podcast_id = db.get_or_create_manual_podcast()
 
         # 检查是否已存在
         existing_ep = db.get_episode_by_eid(podcast_id, eid)
@@ -322,7 +397,7 @@ def api_add_episode():
                     "error": f"该集已在队列中（状态: {existing_ep['status']}）"
                 })
         else:
-            # 添加到 DB
+            # 添加到 DB（source=manual 表示手动添加）
             ep_records = [{
                 "podcast_id": podcast_id,
                 "eid": eid,
@@ -339,11 +414,7 @@ def api_add_episode():
             db.update_episode_status(episode_id, "failed", error_msg="付费内容，无法下载")
             return jsonify({"ok": False, "error": f"该集为付费内容（{ep.paid_price}），无法下载"})
 
-        # 立即加入处理队列
-        episode = db.get_episode_by_id(episode_id)
-        podcast = db.get_podcast_by_pid(pid) if pid else {"name": "单集"}
-        _enqueue_task(episode, dict(podcast))
-
+        # 只添加到数据库，状态为 pending，等用户点"转文字"才真正处理
         return jsonify({
             "ok": True,
             "eid": eid,
@@ -353,54 +424,6 @@ def api_add_episode():
     except Exception as e:
         addLog(f"[错误] 获取失败: {e}", "err")
         return jsonify({"ok": False, "error": str(e)})
-
-
-@app.route("/api/manual/episodes", methods=["GET"])
-def api_manual_episodes():
-    """获取所有手动添加的单集"""
-    episodes = db.list_manual_episodes()
-    return jsonify({
-        "ok": True,
-        "episodes": [
-            {
-                "id": ep["id"],
-                "name": ep["name"],
-                "pub_date": ep["pub_date"][:10] if ep["pub_date"] else "",
-                "duration": ep["duration"],
-                "duration_str": format_duration(ep["duration"]),
-                "is_paid": ep["is_paid"],
-                "status": ep["status"],
-                "txt_path": ep["txt_path"],
-                "podcast_name": ep.get("podcast_name", ""),
-            }
-            for ep in episodes
-        ]
-    })
-
-
-@app.route("/api/manual/enqueue", methods=["POST"])
-def api_manual_enqueue():
-    """手动单集入队（通过数据库 episode_id）"""
-    data = request.get_json()
-    episode_id = int(data["episode_id"])
-
-    episode = db.get_episode_by_id(episode_id)
-    if not episode:
-        return jsonify({"ok": False, "error": "单集不存在"})
-    if episode["status"] in ("downloading", "transcribing"):
-        return jsonify({"ok": False, "error": "该集正在处理中"})
-    if episode["is_paid"]:
-        return jsonify({"ok": False, "error": "该集为付费内容"})
-
-    podcast = db.get_conn().execute(
-        "SELECT * FROM podcasts WHERE id = ?", (episode["podcast_id"],)
-    ).fetchone()
-    if not podcast:
-        return jsonify({"ok": False, "error": "播客不存在"})
-
-    db.update_episode_status(episode_id, "pending")
-    _enqueue_task(episode, dict(podcast))
-    return jsonify({"ok": True})
 
 
 @app.route("/api/episodes/enqueue", methods=["POST"])
@@ -420,17 +443,21 @@ def api_enqueue_episodes():
         return jsonify({"ok": False, "error": "播客不存在"})
     podcast = dict(podcast)
 
-    # 过滤掉付费集（理论上 UI 已经禁用了，但安全检查）
+    # 过滤掉付费集和已经在队列中的集
     episodes = db.list_episodes_by_podcast(podcast_id)
-    to_enqueue = [e for e in episodes if e["eid"] in eids and not e["is_paid"]]
+    to_enqueue = [e for e in episodes if e["eid"] in eids and not e["is_paid"] and e["status"] in ("pending", "failed", "done_deleted")]
 
     if not to_enqueue:
         return jsonify({"ok": False, "error": "没有可下载的集数（全部为付费内容）"})
 
+    # 限制每次最多入队 3 个，避免机器负载过重
+    MAX_ENQUEUE = 10
+    to_enqueue = to_enqueue[:MAX_ENQUEUE]
+
     addLog(f"[队列] 加入 {len(to_enqueue)} 集: {podcast['name']}", "tag")
 
     for ep in to_enqueue:
-        db.update_episode_status(ep["id"], "pending")
+        db.update_episode_status(ep["id"], "queued")
         _enqueue_task(ep, podcast)
 
     return jsonify({"ok": True, "count": len(to_enqueue)})
@@ -455,8 +482,10 @@ def api_refresh_episodes():
     try:
         info = scraper.fetch_podcast_info(podcast["pid"], interval=COOKIE_INTERVAL)
         # 更新播客名称
+        updated_name = podcast["name"]
         if info.name != podcast["name"]:
             db.add_podcast(podcast["pid"], info.name)
+            updated_name = info.name
 
         # 更新 episodes
         ep_records = [{
@@ -470,7 +499,12 @@ def api_refresh_episodes():
         db.add_episodes(ep_records)
 
         addLog(f"[刷新] 完成，共 {len(info.episodes)} 集", "done")
-        return jsonify({"ok": True, "count": len(info.episodes)})
+        # 计算新增的集数量（刷新前 DB 中的集数 vs 刷新后）
+        before_count = db.get_conn().execute(
+            "SELECT COUNT(*) FROM episodes WHERE podcast_id = ?", (podcast_id,)
+        ).fetchone()[0]
+        new_count = max(0, len(info.episodes) - before_count)
+        return jsonify({"ok": True, "count": len(info.episodes), "new_count": new_count, "podcast_name": updated_name})
     except Exception as e:
         addLog(f"[错误] 刷新失败: {e}", "err")
         return jsonify({"ok": False, "error": str(e)})
@@ -484,6 +518,33 @@ def api_delete_podcast():
     return jsonify({"ok": True})
 
 
+@app.route("/api/homepage/status")
+def api_homepage_status():
+    """
+    返回当前活跃任务的状态映射，供首页每5秒轮询同步状态用。
+    返回 {episodeId: status} 格式，仅包含非终态的任务。
+    """
+    statuses = {}
+    # 从 task_queue 取活跃任务
+    with queue_lock:
+        for t in task_queue:
+            if t.get("status") not in ("done", "failed"):
+                statuses[str(t["episode_id"])] = t["status"]
+    # 从 DB 补充 downloading/transcribing/queued 状态
+    conn = db.get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, status FROM episodes
+            WHERE status IN ('downloading', 'transcribing', 'queued')
+        """)
+        for row in cur.fetchall():
+            statuses[str(row["id"])] = row["status"]
+    finally:
+        conn.close()
+    return jsonify({"statuses": statuses})
+
+
 @app.route("/api/podcast/<int:podcast_id>/episodes")
 def api_podcast_episodes(podcast_id: int):
     """获取播客的剧集列表（用于展开子表和详情页）"""
@@ -493,7 +554,10 @@ def api_podcast_episodes(podcast_id: int):
     if not podcast:
         return jsonify({"ok": False, "error": "播客不存在"})
 
+    # 同步检查文件存在性，自动修正状态
+    db.sync_podcast_episodes_status(podcast_id)
     episodes = db.list_episodes_by_podcast(podcast_id)
+
     return jsonify({
         "ok": True,
         "podcast": dict(podcast),
@@ -508,6 +572,7 @@ def api_podcast_episodes(podcast_id: int):
                 "is_paid": e["is_paid"],
                 "status": e["status"],
                 "txt_path": e["txt_path"],
+                "txt_exists": os.path.exists(e["txt_path"]) if e["txt_path"] else False,
             }
             for e in episodes
         ]
@@ -532,17 +597,139 @@ def api_retry_episode(episode_id: int):
     return jsonify({"ok": True})
 
 
+@app.route("/api/episode/open/<int:episode_id>")
+def api_episode_open(episode_id: int):
+    """调用系统程序打开 TXT 文件"""
+    ep = db.get_episode_by_id(episode_id)
+    if not ep:
+        return jsonify({"ok": False, "error": "Episode 不存在"})
+    if not ep["txt_path"] or not os.path.exists(ep["txt_path"]):
+        return jsonify({"ok": False, "error": "文字稿文件不存在"})
+    try:
+        os.startfile(ep["txt_path"])
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/episode/dequeue", methods=["POST"])
+def api_dequeue_episode():
+    """将 episode 从队列中移除，恢复为未转化状态"""
+    data = request.get_json()
+    episode_id = int(data["episode_id"])
+    ep = db.get_episode_by_id(episode_id)
+    if not ep:
+        return jsonify({"ok": False, "error": "Episode 不存在"})
+    db.update_episode_status(episode_id, "pending", txt_path="", error_msg="")
+    with queue_lock:
+        for i, t in enumerate(task_queue):
+            if t["episode_id"] == episode_id:
+                task_queue.pop(i)
+                break
+    return jsonify({"ok": True})
+
+
+@app.route("/api/queue/stop", methods=["GET", "POST"])
+def api_queue_stop():
+    """终止当前正在处理的任务"""
+    global _task_terminated
+    with queue_lock:
+        thread = current_task_thread
+        subp = current_subprocess
+
+# 没有任务在跑，直接刷新页面
+    if thread is None:
+        return """<html><body>
+<meta http-equiv="refresh" content="0;url=/queue">
+</body></html>"""
+
+    # 立即设置终止标记，防止 finally 块重复覆盖状态
+    _task_terminated = True
+
+    # 立即从 task_queue 和 DB 中移除，防止竞态被 worker 重新拾取
+    with queue_lock:
+        for i, t in enumerate(task_queue):
+            db.update_episode_status(t["episode_id"], "failed", error_msg="已终止")
+            task_update(t["eid"], status="failed", error="已终止")
+            task_queue.pop(i)
+            break
+
+    stop_event.set()
+    if subp is not None:
+        try:
+            subp.kill()
+        except Exception:
+            pass
+
+    # 同步等待处理线程结束（最多等 10 秒）
+    thread.join(timeout=10)
+
+    # 返回简单 HTML，3秒后跳转
+    return """<html><body>
+<p style="font-size:20px;padding:20px;">🛑 已终止！3秒后返回队列...</p>
+<p><a href="/queue" style="font-size:16px;">立即返回队列</a></p>
+<script>setTimeout(() => location.href = '/queue', 3000);</script>
+</body></html>"""
+
+
+
 @app.route("/api/queue")
 def api_queue():
     """获取当前队列状态"""
+    # 正在处理：优先从 task_queue 取，同时从 DB 补充（防止任务被 worker 取走后 task_queue 为空的情况）
     with queue_lock:
-        return jsonify({"tasks": list(task_queue)})
+        active = [t for t in task_queue if t.get("status") in ("downloading", "transcribing")]
+    active_eids = {t["eid"] for t in active}
+    # 从 DB 补充 downloading/transcribing 状态的任务
+    conn = db.get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT e.*, p.name as podcast_name
+            FROM episodes e
+            JOIN podcasts p ON e.podcast_id = p.id
+            WHERE e.status IN ('downloading', 'transcribing')
+        """)
+        for row in cur.fetchall():
+            rd = dict(row)
+            if rd["eid"] not in active_eids:
+                active.append(rd)
+                active_eids.add(rd["eid"])
+    finally:
+        conn.close()
+
+    # 排队中：task_queue 里的 pending/queued + DB 里的 queued
+    with queue_lock:
+        in_queue = [t for t in task_queue if t.get("status") in ("pending", "queued")]
+    in_queue_eids = {t["eid"] for t in in_queue}
+    all_pending = db.get_pending_episodes()
+    pending_eids = set()
+    pending = []
+    for p in all_pending:
+        if p["eid"] not in active_eids and p["eid"] not in in_queue_eids and p["eid"] not in pending_eids:
+            pending_eids.add(p["eid"])
+            pending.append(p)
+    # 从 DB 补充 queued 状态（也要去重）
+    conn = db.get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT e.*, p.name as podcast_name FROM episodes e JOIN podcasts p ON e.podcast_id = p.id WHERE e.status = 'queued'")
+        for row in cur.fetchall():
+            rd = dict(row)
+            if rd["eid"] not in active_eids and rd["eid"] not in in_queue_eids and rd["eid"] not in pending_eids:
+                pending.append(rd)
+    finally:
+        conn.close()
+
+    # 从 DB 查询最近完成的任务（重启后仍能保留历史记录）
+    done = db.get_recently_completed_episodes(limit=20)
+    return jsonify({"tasks": active + pending + done})
 
 
 # --------------- 任务队列处理 ---------------
 
 def _enqueue_task(episode: dict, podcast: dict):
-    """将 episode 加入任务队列并启动处理线程"""
+    """将 episode 加入任务队列（仅入队，不启动处理；由 worker 每次取一个处理）"""
     task = {
         "eid": episode["eid"],
         "episode_id": episode["id"],
@@ -554,23 +741,26 @@ def _enqueue_task(episode: dict, podcast: dict):
         "elapsed": 0,
         "error": "",
         "start_time": None,
+        "retry_count": 0,
     }
     with queue_lock:
-        # 避免重复
+        # 避免重复入队
         for t in task_queue:
             if t["eid"] == episode["eid"] and t["status"] not in ("done", "failed"):
                 return
         task_queue.append(task)
     broadcast_sse("task_new", task)
-    threading.Thread(target=_process_task, args=(task,), daemon=True).start()
+    queue_wakeup.set()
 
 
-def _process_task(task: dict):
+def _process_task(task: dict, sevt: threading.Event):
     """在独立线程中处理单个 episode 的完整流程：下载 → 转写 → 清理"""
+    global current_subprocess, _task_terminated
     episode_id = task["episode_id"]
     eid = task["eid"]
     podcast_name = task["podcast_name"]
     episode_name = task["name"]
+    final_status = "transcribing"
 
     output_dir = get_output_dir(podcast_name)
     task_update(eid, status="downloading", progress=0, start_time=time.time())
@@ -585,6 +775,9 @@ def _process_task(task: dict):
         if ep_detail.is_paid:
             raise ValueError(f"该集为付费内容（{ep_detail.paid_price}），跳过")
 
+        if sevt.is_set():
+            raise ValueError("已终止")
+
         audio_url = ep_detail.audio_url
         pid = ep_detail.pid
 
@@ -593,6 +786,10 @@ def _process_task(task: dict):
         dl_result = dl.download(audio_url, episode_name, eid)
         if not dl_result["ok"]:
             raise ValueError(f"下载失败: {dl_result.get('error', '未知错误')}")
+
+        if sevt.is_set():
+            dl.cleanup_progress(eid)
+            raise ValueError("已终止")
 
         audio_file = dl_result["file"]
         elapsed_dl = time.time() - (task.get("start_time") or time.time())
@@ -605,9 +802,10 @@ def _process_task(task: dict):
 
         # 写一个 wrapper 的 progress 回调（transcriber 自己管理进度）
         def progressWatcher():
-            """后台线程：定期读取 transcriber 进度文件"""
             import time
-            for _ in range(200):  # 最多等 100 分钟
+            for _ in range(200):
+                if sevt.is_set():
+                    return
                 time.sleep(30)
                 pfile = output_dir / f"_transcribe_progress_{os.getpid()}.txt"
                 if pfile.exists():
@@ -621,7 +819,10 @@ def _process_task(task: dict):
         progress_thread.start()
 
         # 调用转写（子进程）
-        sub_result = _run_transcriber_subprocess(audio_file, output_dir, episode_name, ep_detail.audio_url)
+        sub_result = _run_transcriber_subprocess(audio_file, output_dir, episode_name, ep_detail.audio_url, eid, sevt)
+
+        if sevt.is_set():
+            raise ValueError("已终止")
 
         if not sub_result["ok"]:
             raise ValueError(f"转写失败: {sub_result.get('error', '未知错误')}")
@@ -631,6 +832,7 @@ def _process_task(task: dict):
 
         # ---- 更新 DB ----
         db.update_episode_status(episode_id, "done_deleted", txt_path=txt_file)
+        final_status = "done_deleted"
         task_update(eid, status="done_deleted", progress=100, elapsed=int(total_elapsed))
         addLog(f"[完成] {episode_name[:30]}，用时 {int(total_elapsed)}秒，已删除音频", "done")
 
@@ -645,20 +847,118 @@ def _process_task(task: dict):
         total_elapsed = time.time() - (task.get("start_time") or time.time())
         err_msg = str(e)
         addLog(f"[失败] {episode_name[:30]}: {err_msg}", "err")
+
+        retry_count = task.get("retry_count", 0)
+        if retry_count < 2 and not sevt.is_set() and not _task_terminated:
+            # 自动重试：重新入队，等 worker 再次处理
+            task["retry_count"] = retry_count + 1
+            task["status"] = "queued"
+            task["progress"] = 0
+            task["error"] = err_msg
+            task["elapsed"] = 0
+            task["start_time"] = None
+            db.update_episode_status(episode_id, "queued")
+            addLog(f"[重试] {episode_name[:30]} 第{retry_count+1}次，将在完成后重新加入队列", "tag")
+            queue_wakeup.set()
+            return
+
+        # 超过2次重试或已终止，标记为失败
         db.update_episode_status(episode_id, "failed", error_msg=err_msg)
+        final_status = "failed"
         task_update(eid, status="failed", elapsed=int(total_elapsed), error=err_msg)
 
     finally:
-        # 从队列移除
         with queue_lock:
             for i, t in enumerate(task_queue):
                 if t["eid"] == eid:
                     task_queue.pop(i)
                     break
+        current_subprocess = None
 
 
-def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name: str, episode_url: str) -> dict:
+def _queue_worker():
+    """后台 worker：优先从 task_queue 取任务，队列空时从 DB 补充"""
+    while True:
+        queue_wakeup.wait(timeout=3)
+        queue_wakeup.clear()
+
+        # 优先从 task_queue 取 pending/queued 任务
+        with queue_lock:
+            pending = [t for t in task_queue if t.get("status") in ("pending", "queued")]
+            if pending:
+                task = pending[0]
+                task_queue.remove(task)
+            else:
+                task = None
+
+        if task:
+            # 从 task_queue 取到的任务（DB 状态已是 queued），直接启动处理
+            _start_task_thread(task)
+            continue
+
+        # task_queue 为空，从 DB 补充
+        conn = db.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT e.*, p.name as podcast_name
+                FROM episodes e
+                JOIN podcasts p ON e.podcast_id = p.id
+                WHERE e.status = 'queued'
+                ORDER BY e.created_at ASC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            continue
+
+        ep = dict(row)
+
+        task = {
+            "eid": ep["eid"],
+            "episode_id": ep["id"],
+            "name": ep["name"],
+            "podcast_id": ep["podcast_id"],
+            "podcast_name": ep["podcast_name"],
+            "status": "pending",
+            "progress": 0,
+            "elapsed": 0,
+            "error": "",
+            "start_time": None,
+            "retry_count": 0,
+        }
+        with queue_lock:
+            for t in task_queue:
+                if t["eid"] == ep["eid"] and t["status"] in ("downloading", "transcribing"):
+                    task = None
+                    break
+            if task:
+                task_queue.append(task)
+        if task:
+            _start_task_thread(task)
+
+
+def _start_task_thread(task: dict):
+    """启动任务处理线程（统一入口）"""
+    db.update_episode_status(task["episode_id"], "downloading")
+    task_update(task["eid"], status="downloading", progress=0, start_time=time.time())
+    stop_event.clear()
+    t = threading.Thread(target=_process_task, args=(task, stop_event), daemon=True)
+    with queue_lock:
+        current_task_thread = t
+    t.start()
+    t.join()
+    with queue_lock:
+        current_task_thread = None
+        current_subprocess = None
+
+
+def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name: str, episode_url: str, eid: str, sevt: threading.Event) -> dict:
     """启动子进程运行转写"""
+    global current_subprocess
     transcriber_py = Path(__file__).parent / "transcriber.py"
 
     cmd = [
@@ -676,7 +976,6 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
         "HF_ENDPOINT": "https://hf-mirror.com",
         "HF_HOME": r"C:\Users\wule_\.cache\hf_test",
     }
-    # ffmpeg + CUDA 进 PATH
     ffmpeg_dir = str(Path(__file__).parent / "ffmpeg" / "ffmpeg-master-latest-win64-gpl" / "bin")
     cuda_bin = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
     env["PATH"] = ffmpeg_dir + os.pathsep + cuda_bin + os.pathsep + os.environ.get("PATH", "")
@@ -689,9 +988,13 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
         encoding='utf-8',
         errors='replace',
     )
+    current_subprocess = proc
 
-    # 读取输出直到完成
     while True:
+        if sevt.is_set():
+            proc.terminate()
+            proc.wait()
+            return {"ok": False, "error": "已终止"}
         line = proc.stdout.readline()
         if not line and proc.poll() is not None:
             break
@@ -701,17 +1004,21 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
                 event = msg.get("event", "")
                 data = msg.get("data", "")
                 if event == "status":
-                    # 提取进度 pct，如 "[45%]"
                     import re as _re
                     m = _re.search(r'\[(\d+)%\]', str(data))
                     if m:
                         pct = int(m.group(1))
-                        # 进度回调会在 transcriber 内部处理
+                        task_update(eid, progress=pct, status_text=str(data))
             except Exception:
                 pass
         elif line.startswith("RESULT:"):
             try:
                 result = json.loads(line[7:])
+                try:
+                    result_file = output_dir / f"_transcribe_result_{proc.pid}.json"
+                    result_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 return result
             except Exception:
                 pass
@@ -720,6 +1027,11 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
     if proc.returncode != 0:
         stderr = proc.stderr.read() if proc.stderr else ""
         return {"ok": False, "error": f"子进程返回码 {proc.returncode}: {stderr[:200]}"}
+    try:
+        result_file = output_dir / f"_transcribe_result_{proc.pid}.json"
+        result_file.unlink(missing_ok=True)
+    except Exception:
+        pass
     return {"ok": False, "error": "未收到结果"}
 
 
@@ -746,8 +1058,32 @@ def api_refresh():
 # --------------- 初始化 ---------------
 
 if __name__ == "__main__":
-    # 初始化数据库
+    # 初始化数据库并确保虚拟播客存在
     db.init_db()
+    db.get_or_create_manual_podcast()
+
+    # 启动队列 worker（单线程，每次只处理一个任务）
+    # 启动时清空 task_queue，防止 Flask 重启后的残留任务显示
+    with queue_lock:
+        task_queue.clear()
+
+    # 启动时清理卡住的状态：downloading/transcribing -> queued
+    # （Flask 重启前可能正在处理，重启后 DB 状态残留）
+    conn = db.get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE episodes
+        SET status = 'queued'
+        WHERE status IN ('downloading', 'transcribing')
+    """)
+    count = cur.rowcount
+    conn.commit()
+    conn.close()
+    if count > 0:
+        print(f"[队列] 重置了 {count} 个卡住的任务为排队状态")
+    t = threading.Thread(target=_queue_worker, daemon=True, name="QueueWorker")
+    t.start()
+    print(f"[队列] Worker 线程已启动 (alive={t.is_alive()})")
 
     # 检查 ffmpeg
     if not Path(__file__).parent.joinpath("ffmpeg").exists():

@@ -135,7 +135,7 @@
   .col-name { width: auto; }
   .col-num { width: 90px; text-align: center; }
   .col-date { width: 140px; text-align: center; }
-  .col-actions { width: 80px; text-align: right; }
+  .col-actions { width: 160px; text-align: right; overflow: visible; }
 
   /* 行悬浮效果 */
   tbody tr.row-main { cursor: pointer; transition: background 0.1s; }
@@ -170,6 +170,22 @@
     animation: badge-pulse 2s ease-in-out infinite;
     flex-shrink: 0;
   }
+  .spin-icon {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(29, 78, 216, 0.2);
+    border-top-color: #1d4ed8;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 4px;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
   @keyframes badge-pulse {
     0%, 100% { box-shadow: 0 0 0 2px rgba(239,68,68,0.25); }
     50% { box-shadow: 0 0 0 4px rgba(239,68,68,0.15); }
@@ -188,7 +204,8 @@
   .date-cell { text-align: center; white-space: nowrap; color: var(--text-secondary); font-size: 13px; }
 
   /* 操作列 */
-  .action-btns { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+  .action-btns { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; overflow: visible; }
+  td.col-actions { overflow: visible; }
 
   /* ---- 展开的子表格 ---- */
   tr.expanded-row td {
@@ -203,20 +220,7 @@
   .sub-table {
     width: 100%;
     border-collapse: collapse;
-    table-layout: fixed;
     margin-top: 12px;
-  }
-  .sub-table th {
-    background: var(--gray-bg);
-    padding: 8px 12px;
-    text-align: left;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
   }
   .sub-table td {
     padding: 10px 12px;
@@ -227,6 +231,11 @@
     text-overflow: ellipsis;
     vertical-align: middle;
   }
+  .sub-table td:first-child { text-align: left; }
+  .sub-table td:nth-child(2),
+  .sub-table td:nth-child(3),
+  .sub-table td:nth-child(4),
+  .sub-table td:nth-child(5) { text-align: center; }
   .sub-table tr:last-child td { border-bottom: none; }
   .sub-table tr:hover td { background: var(--hover-bg); }
   .col-sub-title { width: auto; }
@@ -253,6 +262,15 @@
     background: #fef3c7;
     color: #92400e;
   }
+  .pending-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #fef3c7;
+    color: #d97706;
+  }
   .free-tag {
     display: inline-block;
     padding: 2px 8px;
@@ -272,6 +290,31 @@
     color: #9ca3af;
     cursor: not-allowed;
   }
+  .downloading-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #fef3c7;
+    color: #92400e;
+  }
+  .transcribing-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+  .failed-link {
+    color: #dc2626;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .failed-link:hover { text-decoration: underline; }
   .done-link {
     color: #166534;
     text-decoration: none;
@@ -391,8 +434,20 @@
   .btn-confirm-no:hover { background: var(--gray-bg); }
 
   /* ---- 队列列表页 ---- */
-  #queue-list-view { display: none; }
+  .hidden { display: none !important; }
   #detail-view { display: none; }
+  .queue-current-card {
+    background: var(--card); border: 1px solid var(--primary);
+    border-radius: 12px; padding: 16px 20px;
+  }
+  .qc-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+  .qc-progress-bar {
+    height: 8px; background: var(--gray-bg); border-radius: 4px; overflow: hidden; margin-bottom: 8px;
+  }
+  .qc-progress-fill { height: 100%; background: var(--primary); border-radius: 4px; transition: width 0.3s; }
+  .qc-meta { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); }
+  .qc-status { color: var(--primary); font-weight: 500; }
+  .qc-pct { font-weight: 600; }
   .queue-page-item {
     background: var(--card); border: 1px solid var(--border);
     border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
@@ -460,7 +515,7 @@
 <div class="topbar">
   <h1><span>Voice</span>ToFile</h1>
   <div class="topbar-right">
-    <button class="btn btn-secondary btn-sm" onclick="showQueueView()">📋 队列</button>
+    <button class="btn btn-secondary btn-sm" onclick="window.open('/queue', '_blank')">📋 队列</button>
     <button class="btn btn-secondary btn-sm">⚙ 设置</button>
   </div>
 </div>
@@ -469,21 +524,11 @@
 <div class="container" id="main-view">
 
   <!-- 走马灯 -->
-  <div class="ticker-wrap" onclick="showQueueView()">
+  <div class="ticker-wrap" onclick="window.open('/queue', '_blank')">
     <div class="ticker">
       <span class="ticker-label">● 正在处理</span>
       <div class="ticker-items" id="ticker-items">
-        <span class="ticker-item">
-          <span class="name">随机波动</span> — 第3集<span class="status">[45%]</span>
-        </span>
-        <span class="ticker-sep">▮</span>
-        <span class="ticker-item">
-          <span class="name">半拿铁</span> — 第1集<span class="status">[转写中]</span>
-        </span>
-        <span class="ticker-sep">▮</span>
-        <span class="ticker-item">
-          <span class="name">谐聊</span> — 第5集<span class="status">[下载中]</span>
-        </span>
+        <span class="ticker-empty">暂无正在处理的任务</span>
       </div>
       <span class="ticker-hint">▼ 点击查看全部</span>
     </div>
@@ -521,22 +566,23 @@
           </td>
           <td class="col-name">
             <div class="podcast-name-cell">
-              <span class="expand-icon">▶</span>
+              <span class="expand-icon" id="expand-icon-{{ p.id }}">▶</span>
               <span class="new-badge" id="badge-{{ p.id }}"></span>
-              <span class="podcast-name-text"><a onclick="event.stopPropagation(); showDetail({{ p.id }})">{{ p.name }}</a></span>
+              <span class="podcast-name-text"><a onclick="event.stopPropagation(); window.open('/podcast/{{ p.id }}', '_blank')">{{ p.name }}</a></span>
             </div>
           </td>
-          <td class="col-num num-cell"><a onclick="event.stopPropagation(); showDetail({{ p.id }})">{{ p.total_episodes }}</a><span>集</span></td>
-          <td class="col-num num-cell"><a onclick="event.stopPropagation(); showDetail({{ p.id }})">{{ p.done_episodes }}</a><span>集</span></td>
-          <td class="date-cell">{{ p.latest_pub_date[5:10] if p.latest_pub_date else '—' }}</td>
+          <td class="col-num num-cell">{{ p.total_episodes }}<span>集</span></td>
+          <td class="col-num num-cell">{{ p.done_episodes }}<span>集</span></td>
+          <td class="date-cell" data-date="{{ p.latest_pub_date if p.latest_pub_date else '' }}">{{ p.latest_pub_date[5:10] if p.latest_pub_date else '—' }}</td>
           <td class="col-actions" onclick="event.stopPropagation();">
             <div class="action-btns">
-              <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); showDetail({{ p.id }})">查看</button>
+              <button class="btn btn-secondary btn-sm" onclick="window.open('/podcast/{{ p.id }}', '_blank')">查看</button>
+              <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); refreshPodcast({{ p.id }})">刷新</button>
               <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); deletePodcast({{ p.id }})">删除</button>
             </div>
           </td>
         </tr>
-        <!-- 展开内容：最新5集（通过 JavaScript 动态加载） -->
+        <!-- 展开的子表（显示最新5集 + 查看全部链接） -->
         <tr class="expanded-row" id="expand-{{ p.id }}" style="display:none;">
           <td colspan="6">
             <div class="expanded-content">
@@ -544,9 +590,9 @@
                 <thead>
                   <tr>
                     <th class="col-sub-title">标题</th>
-                    <th class="col-sub-time">播客发布时间</th>
+                    <th class="col-sub-time">发布时间</th>
                     <th class="col-sub-len">音频长度</th>
-                    <th class="col-sub-done">是否已转文字</th>
+                    <th class="col-sub-done">状态</th>
                     <th class="col-sub-free">是否免费</th>
                   </tr>
                 </thead>
@@ -554,7 +600,7 @@
                   <tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:20px;">加载中...</td></tr>
                 </tbody>
               </table>
-              <div class="load-more" onclick="event.stopPropagation(); showDetail({{ p.id }})">▼ 查看全部 {{ p.total_episodes }} 集</div>
+              <div class="load-more" id="loadmore-{{ p.id }}" onclick="event.stopPropagation(); window.open('/podcast/{{ p.id }}', '_blank')">▼ 查看全部 {{ p.total_episodes }} 集（已转 {{ p.done_episodes }} 集）</div>
             </div>
           </td>
         </tr>
@@ -567,62 +613,6 @@
         {% endfor %}
       </tbody>
     </table>
-  </div>
-
-  <!-- ========== 手动添加单集 ========== -->
-  <div id="manual-section" style="margin-top:24px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-      <h2 style="font-size:15px;font-weight:600;color:var(--text-secondary);">📦 手动添加单集</h2>
-      <button class="btn btn-secondary btn-sm" onclick="showAddDialog()">➕ 手动添加</button>
-    </div>
-    <div id="manual-list">
-      {% if manual_episodes %}
-      <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;">
-        <table style="width:100%;border-collapse:collapse;font-size:13px;">
-          <thead>
-            <tr style="background:#f6f8fa;">
-              <th style="padding:10px 16px;text-align:left;color:var(--text-secondary);font-weight:500;">标题</th>
-              <th style="padding:10px 16px;color:var(--text-secondary);font-weight:500;width:120px;">发布时间</th>
-              <th style="padding:10px 16px;color:var(--text-secondary);font-weight:500;width:90px;">音频长度</th>
-              <th style="padding:10px 16px;color:var(--text-secondary);font-weight:500;width:100px;">状态</th>
-              <th style="padding:10px 16px;color:var(--text-secondary);font-weight:500;width:70px;">免费</th>
-            </tr>
-          </thead>
-          <tbody id="manual-tbody">
-            {% for ep in manual_episodes %}
-            <tr style="border-top:1px solid var(--border);">
-              <td style="padding:10px 16px;">{{ ep.name }}</td>
-              <td style="padding:10px 16px;color:var(--text-secondary);">{{ ep.pub_date[5:10] if ep.pub_date else '—' }}</td>
-              <td style="padding:10px 16px;color:var(--text-secondary);">{{ '—' if not ep.duration else ep.duration }}</td>
-              <td style="padding:10px 16px;">
-                {% if ep.status == 'done_deleted' %}
-                  <a href="#" class="done-link" onclick="event.preventDefault(); openTxt('{{ ep.txt_path }}')">已转文字</a>
-                {% elif ep.status == 'pending' %}
-                  <a href="#" class="undone-link" onclick="event.preventDefault(); enqueueManualEpisode({{ ep.id }})">未转文字</a>
-                {% elif ep.status == 'downloading' or ep.status == 'transcribing' %}
-                  <span style="color:var(--orange);">处理中</span>
-                {% else %}
-                  <span style="color:var(--text-secondary);">{{ ep.status }}</span>
-                {% endif %}
-              </td>
-              <td style="padding:10px 16px;">
-                {% if ep.is_paid %}
-                  <span class="paid-tag">收费</span>
-                {% else %}
-                  <span class="free-tag">免费</span>
-                {% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% else %}
-      <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:32px;text-align:center;color:var(--text-secondary);font-size:13px;">
-        暂无手动添加的单集<br><button class="btn btn-primary btn-sm" onclick="showAddDialog()" style="margin-top:12px;">➕ 手动添加</button>
-      </div>
-      {% endif %}
-    </div>
   </div>
 
 </div>
@@ -833,21 +823,6 @@
   </div>
 </div>
 
-<!-- 队列列表页 -->
-<div class="container" id="queue-list-view">
-  <div id="queue-header" style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
-    <button class="btn btn-secondary btn-icon" onclick="showMainView()">← 返回</button>
-    <h2 style="font-size:16px; font-weight:600;">📋 处理队列</h2>
-    <span id="queue-count" class="table-count">共 0 个任务</span>
-  </div>
-
-  <div id="queue-items">
-    <div class="queue-page-item status-pending" style="text-align:center;padding:20px;color:var(--text-secondary);">
-      暂无处理中的任务
-    </div>
-  </div>
-</div>
-
 <!-- 订阅播客对话框 -->
 <div class="dialog-overlay" id="sub-dialog">
   <div class="dialog">
@@ -886,12 +861,23 @@
   </div>
 </div>
 
+<div class="dialog-overlay" id="error-dialog-overlay">
+  <div class="dialog">
+    <h3>❌ 错误信息</h3>
+    <div id="error-msg-text" style="margin: 16px 0; color: var(--text); font-size: 13px; white-space: pre-wrap;"></div>
+    <div class="dialog-footer">
+      <button class="btn btn-primary" onclick="closeErrorDialog()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
 // ============ 全局状态 ============
 let currentExpanded = null;
-let episodeCache = {};  // podcastId -> episodes data
+let episodeCache = {};  // podcastId -> episodes array
+let podcastMeta = {};   // podcastId -> {total_episodes, done_episodes}
 let detailEpisodes = [];  // 当前详情页的剧集列表
 let detailPage = 1;
 let detailPodcastId = null;
@@ -904,7 +890,7 @@ function formatDate(dateStr) {
   // dateStr format: 2024-04-15T14:30:25 or 2024-04-15
   const d = new Date(dateStr);
   if (isNaN(d)) return dateStr.substring(5, 10);
-  return `${d.getMonth()+1}月${d.getDate()}日 ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+  return `${(d.getMonth()+1).toString().padStart(2,'0')}-${d.getDate().toString().padStart(2,'0')} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
 }
 
 function toast(msg, type='info') {
@@ -914,13 +900,22 @@ function toast(msg, type='info') {
   setTimeout(() => el.classList.remove('show'), 3000);
 }
 
+function showErrorMsg(msg) {
+  const overlay = document.getElementById('error-dialog-overlay');
+  document.getElementById('error-msg-text').textContent = msg;
+  overlay.style.display = 'flex';
+}
+function closeErrorDialog() {
+  document.getElementById('error-dialog-overlay').style.display = 'none';
+}
+
 // ============ 展开/收起 ============
 async function toggleExpand(row) {
   const podcastId = parseInt(row.dataset.podcast);
   const expandedRow = row.nextElementSibling;
   if (!expandedRow || !expandedRow.classList.contains('expanded-row')) return;
 
-  const icon = row.querySelector('.expand-icon');
+  const icon = document.getElementById(`expand-icon-${podcastId}`);
   const nameCell = row.querySelector('.podcast-name-cell');
 
   if (currentExpanded === expandedRow) {
@@ -939,16 +934,23 @@ async function toggleExpand(row) {
     // 加载数据（如果还没有缓存）
     if (!episodeCache[podcastId]) {
       const tbody = document.getElementById(`subtbody-${podcastId}`);
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:20px;">加载中...</td></tr>';
       try {
         const resp = await fetch(`/api/podcast/${podcastId}/episodes`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         if (data.ok) {
           episodeCache[podcastId] = data.episodes;
+          podcastMeta[podcastId] = {
+            total: data.episodes.length,
+            done: data.episodes.filter(e => e.status === 'done_deleted').length
+          };
           renderSubTable(podcastId, data.episodes.slice(0, 5));
+        } else {
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--red);padding:20px;">加载失败: ${data.error || '未知错误'}</td></tr>`;
         }
       } catch (e) {
         console.error('加载剧集失败:', e);
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--red);padding:20px;">加载失败: ${e.message}</td></tr>`;
       }
     } else {
       renderSubTable(podcastId, episodeCache[podcastId].slice(0, 5));
@@ -959,17 +961,18 @@ async function toggleExpand(row) {
     icon.classList.add('expanded');
     currentExpanded = expandedRow;
 
-    // 同步红点
-    const firstRowHasBadge = expandedRow.querySelector('.sub-table tbody tr:first-child .new-badge');
-    let mainBadge = nameCell.querySelector('.new-badge');
-    if (firstRowHasBadge) {
-      if (!mainBadge) {
-        mainBadge = document.createElement('span');
-        mainBadge.className = 'new-badge';
-        nameCell.insertBefore(mainBadge, nameCell.firstChild);
+    // 同步处理中图标
+    const firstRowHasSpin = expandedRow.querySelector('.sub-table tbody tr:first-child .spin-icon');
+    let mainSpin = nameCell.querySelector('.spin-icon');
+    if (firstRowHasSpin) {
+      if (!mainSpin) {
+        mainSpin = document.createElement('span');
+        mainSpin.className = 'spin-icon';
+        mainSpin.textContent = '◌';
+        nameCell.insertBefore(mainSpin, nameCell.firstChild);
       }
     } else {
-      if (mainBadge) mainBadge.remove();
+      if (mainSpin) mainSpin.remove();
     }
 
     // 标记为已查看（展开即视为查看）
@@ -981,36 +984,58 @@ function renderSubTable(podcastId, episodes) {
   const tbody = document.getElementById(`subtbody-${podcastId}`);
   if (!tbody) return;
 
+  // 先清空，防止重复渲染
+  tbody.innerHTML = '';
+
   if (!episodes || episodes.length === 0) {
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:20px;">暂无剧集</td></tr>';
     return;
   }
 
+  // 更新"查看全部"数字（使用 podcastMeta 中的真实总数）
+  const meta = podcastMeta[podcastId] || { total: episodes.length, done: 0 };
+  const loadmore = document.getElementById(`loadmore-${podcastId}`);
+  if (loadmore) {
+    loadmore.textContent = `▼ 查看全部 ${meta.total} 集（已转 ${meta.done} 集）`;
+  }
+  const btn = document.getElementById(`sub-refresh-${podcastId}`);
+  const hasProcessing = episodes.some(e => e.status === 'downloading' || e.status === 'transcribing');
+  if (btn) btn.disabled = hasProcessing;
+
   tbody.innerHTML = episodes.map((ep, idx) => {
     const isDone = ep.status === 'done_deleted';
     const isPaid = ep.is_paid;
-    let doneHtml, freeHtml;
+    const isFailed = ep.status === 'failed';
+    const isProcessing = ep.status === 'downloading' || ep.status === 'transcribing';
+    const isQueued = ep.status === 'queued';
+    const isPending = ep.status === 'pending';
+    let statusHtml;
 
     if (isDone) {
-      doneHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt('${ep.txt_path}')">已转文字</a>`;
+      statusHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt(${ep.id})">已转化</a>`;
     } else if (isPaid) {
-      doneHtml = '<span class="paid-tag">不可转</span>';
+      statusHtml = '<span class="paid-tag">不可转</span>';
+    } else if (isFailed) {
+      statusHtml = '<span class="failed-link">失败</span>';
+    } else if (isProcessing) {
+      statusHtml = '<span class="transcribing-tag"><span class="spin-icon"></span>处理中</span>';
+    } else if (isQueued) {
+      statusHtml = '<span class="pending-tag">排队中</span>';
+    } else if (isPending) {
+      statusHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${podcastId})">未转化</a>`;
     } else {
-      doneHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${podcastId})">未转文字</a>`;
+      statusHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${podcastId})">未转化</a>`;
     }
 
-    if (isPaid) {
-      freeHtml = '<span class="paid-tag">收费</span>';
-    } else {
-      freeHtml = '<span class="free-tag">免费</span>';
-    }
+    freeHtml = isPaid ? '<span class="paid-tag">收费</span>' : '<span class="free-tag">免费</span>';
 
-    const hasNew = idx === 0 && isDone;  // 最新且已转文字的标记
-    return `<tr>
-      <td>${hasNew ? '<span class="new-badge"></span>' : ''}${escapeHtml(ep.name)}</td>
+    const hasNew = idx === 0 && isDone;  // 最新且已转化标记
+    const xiaoyuzhouUrl = `https://www.xiaoyuzhoufm.com/episode/${ep.eid}`;
+    return `<tr data-ep-id="${ep.id}">
+      <td><a href="${xiaoyuzhouUrl}" target="_blank" style="color:var(--text);text-decoration:none;">${isProcessing ? '<span class="spin-icon"></span>' : ''}${hasNew ? '<span class="new-badge"></span>' : ''}${escapeHtml(ep.name)}</a></td>
       <td>${formatDate(ep.pub_date)}</td>
       <td>${ep.duration_str || '—'}</td>
-      <td>${doneHtml}</td>
+      <td>${statusHtml}</td>
       <td>${freeHtml}</td>
     </tr>`;
   }).join('');
@@ -1022,6 +1047,27 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+async function refreshSubTable(podcastId) {
+  const btn = document.getElementById(`sub-refresh-${podcastId}`);
+  if (btn && btn.disabled) return;
+
+  try {
+    const resp = await fetch(`/api/podcast/${podcastId}/episodes`);
+    const data = await resp.json();
+    if (data.ok) {
+      episodeCache[podcastId] = data.episodes;
+      podcastMeta[podcastId] = {
+        total: data.episodes.length,
+        done: data.episodes.filter(e => e.status === 'done_deleted').length
+      };
+      // 更新子表显示前5条
+      renderSubTable(podcastId, data.episodes.slice(0, 5));
+    }
+  } catch (e) {
+    console.error('刷新子表失败:', e);
+  }
+}
+
 // ============ 详情页 ============
 async function showDetail(podcastId) {
   // 标记为已查看（持久化到 localStorage）并清除红点
@@ -1031,9 +1077,8 @@ async function showDetail(podcastId) {
   detailPage = 1;
 
   // 显示详情页容器
-  document.getElementById('main-view').style.display = 'none';
-  document.getElementById('queue-list-view').style.display = 'none';
-  document.getElementById('detail-view').style.display = 'block';
+  document.getElementById('main-view').classList.add('hidden');
+  document.getElementById('detail-view').classList.remove('hidden');
 
   // 如果没有缓存，先加载
   if (!episodeCache[podcastId]) {
@@ -1067,14 +1112,15 @@ function renderDetailPage() {
   document.getElementById('detail-title').textContent = `📻 ${escapeHtml(detailPodcastName)}`;
   document.getElementById('detail-count').textContent = `共 ${total} 集`;
 
-  // 更新统计
+  // 更新统计（未转文字 = 排队中+下载中+转写中+失败）
+  const processingCount = episodes.filter(e => ['pending', 'queued', 'downloading', 'transcribing', 'failed'].includes(e.status)).length;
   document.getElementById('detail-stats').innerHTML = `
     <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
       <div style="font-size:24px; font-weight:700; color:var(--green);">${doneCount}</div>
       <div style="font-size:12px; color:var(--text-secondary);">已转文字</div>
     </div>
     <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
-      <div style="font-size:24px; font-weight:700; color:var(--orange);">${total - doneCount - paidCount}</div>
+      <div style="font-size:24px; font-weight:700; color:var(--orange);">${processingCount}</div>
       <div style="font-size:12px; color:var(--text-secondary);">未转文字</div>
     </div>
     <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
@@ -1083,28 +1129,38 @@ function renderDetailPage() {
     </div>
   `;
 
-  // 更新表格
+  // 更新表格（状态标签与子表一致）
   const tbody = document.getElementById('detail-tbody');
   tbody.innerHTML = pageEpisodes.map(ep => {
     const isDone = ep.status === 'done_deleted';
     const isPaid = ep.is_paid;
-    let doneHtml, freeHtml;
+    const isFailed = ep.status === 'failed';
+    const isProcessing = ep.status === 'downloading' || ep.status === 'transcribing';
+    const isQueued = ep.status === 'queued';
+    let statusHtml;
 
     if (isDone) {
-      doneHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt('${ep.txt_path}')">已转文字</a>`;
+      statusHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt(${ep.id})">已转化</a>`;
     } else if (isPaid) {
-      doneHtml = '<span class="paid-tag">不可转</span>';
+      statusHtml = '<span class="paid-tag">不可转</span>';
+    } else if (isFailed) {
+      statusHtml = '<span class="failed-link">失败</span>';
+    } else if (isProcessing) {
+      statusHtml = '<span class="transcribing-tag"><span class="spin-icon"></span>处理中</span>';
+    } else if (isQueued) {
+      statusHtml = '<span class="pending-tag">排队中</span>';
     } else {
-      doneHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${detailPodcastId})">未转文字</a>`;
+      statusHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${detailPodcastId})">未转化</a>`;
     }
 
-    freeHtml = isPaid ? '<span class="paid-tag">收费</span>' : '<span class="free-tag">免费</span>';
+    const freeHtml = isPaid ? '<span class="paid-tag">收费</span>' : '<span class="free-tag">免费</span>';
+    const xiaoyuzhouUrl = `https://www.xiaoyuzhoufm.com/episode/${ep.eid}`;
 
-    return `<tr>
-      <td class="col-name">${escapeHtml(ep.name)}</td>
+    return `<tr data-ep-id="${ep.id}">
+      <td class="col-name"><a href="${xiaoyuzhouUrl}" target="_blank" style="color:var(--text);text-decoration:none;">${isProcessing ? '<span class="spin-icon"></span>' : ''}${escapeHtml(ep.name)}</a></td>
       <td>${formatDate(ep.pub_date)}</td>
       <td>${ep.duration_str || '—'}</td>
-      <td>${doneHtml}</td>
+      <td>${statusHtml}</td>
       <td>${freeHtml}</td>
     </tr>`;
   }).join('');
@@ -1181,13 +1237,16 @@ async function downloadAllUndone() {
   }
 }
 
-function openTxt(txtPath) {
-  if (!txtPath) {
-    toast('文字稿路径不存在', 'error');
-    return;
+async function openTxt(episodeId) {
+  try {
+    const resp = await fetch(`/api/episode/open/${episodeId}`);
+    const data = await resp.json();
+    if (!data.ok) {
+      toast(data.error || '打开失败', 'error');
+    }
+  } catch (e) {
+    toast('打开失败', 'error');
   }
-  // 用系统默认程序打开
-  window.open('file:///' + txtPath.replace(/\\/g, '/'), '_blank');
 }
 
 // ============ 队列视图 ============
@@ -1195,57 +1254,142 @@ async function loadQueue() {
   try {
     const resp = await fetch('/api/queue');
     const data = await resp.json();
+    // 用 API 数据更新走马灯缓存（作为 SSE 的补充，防止漏掉）
+    if (data.tasks) {
+      window._tickerTasks = data.tasks;
+      updateTicker(window._tickerTasks);
+    }
     renderQueue(data.tasks || []);
+    // 不在这里调 refreshSubTable —— SSE 事件会更新 episodeCache，
+    // task_done 时会调 refreshSubTable 获取最终状态
   } catch (e) {
     console.error('加载队列失败:', e);
   }
 }
 
-function renderQueue(tasks) {
-  const container = document.getElementById('queue-items');
-  if (!tasks || tasks.length === 0) {
-    container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">暂无处理中的任务</div>';
-    document.getElementById('queue-count').textContent = '共 0 个任务';
+function updateTicker(tasks) {
+  const tickerItems = document.getElementById('ticker-items');
+  if (!tickerItems) {
+    console.warn('[Ticker] #ticker-items not found');
+    return;
+  }
+  console.log('[Ticker] tasks:', tasks.map(t => ({ eid: t.eid, status: t.status })));
+
+  // 优先显示正在处理的任务（包括刚入队等待处理的状态：pending/queued）
+  const current = tasks.find(t =>
+    t.status === 'downloading' || t.status === 'transcribing' ||
+    t.status === 'pending' || t.status === 'queued'
+  );
+  if (current) {
+    const pct = current.progress || 0;
+    let statusLabel = current.status === 'downloading' ? '音频下载中'
+      : current.status === 'transcribing' ? '音频转文字中'
+      : '排队中';
+    tickerItems.innerHTML = `
+      <span class="ticker-item">
+        <span class="name">${escapeHtml(current.podcast_name)}</span> — ${escapeHtml(current.name)}
+        ${pct > 0 ? `<span class="status">${pct}%</span>` : ''}
+        <span class="status">[${statusLabel}]</span>
+      </span>`;
     return;
   }
 
-  container.innerHTML = tasks.map(task => {
-    const statusMap = {
-      'pending': { cls: 'pending', label: '等待中' },
-      'downloading': { cls: 'downloading', label: '下载中' },
-      'transcribing': { cls: 'transcribing', label: '转写中' },
-      'done_deleted': { cls: 'done_deleted', label: '已完成' },
-      'failed': { cls: 'failed', label: '失败' },
-    };
-    const s = statusMap[task.status] || statusMap['pending'];
-    return `<div class="queue-page-item status-${s.cls}">
-      <div class="qinfo">
-        <div class="qinfo-name">${escapeHtml(task.podcast_name)} — ${escapeHtml(task.name)}</div>
-        <div class="qinfo-sub">${task.podcast_name}</div>
-      </div>
-      <span class="qstatus ${s.cls}">${s.label}</span>
-      <span class="qprogress">${task.progress || 0}%</span>
-      <span class="qtime">${task.elapsed || 0}秒</span>
-    </div>`;
-  }).join('');
+  tickerItems.innerHTML = '<span class="ticker-empty">暂无正在处理的任务</span>';
+}
 
-  // 更新头部计数
-  const count = tasks.filter(t => t.status !== 'done_deleted').length;
-  document.getElementById('queue-count').textContent = `共 ${count} 个任务`;
+// 维护一个简化版任务缓存，仅用于走马灯（SSE 实时更新）
+window._tickerTasks = [];
+
+// 每5秒同步一次首页状态：刷新所有展开的子表，保证状态最终一致
+async function syncHomepageStatus() {
+  for (const podcastId of Object.keys(episodeCache)) {
+    const expandedRow = document.getElementById(`expand-${podcastId}`);
+    if (expandedRow && expandedRow.style.display !== 'none') {
+      await refreshSubTable(parseInt(podcastId));
+    }
+  }
+}
+setInterval(syncHomepageStatus, 5000);
+
+function renderQueue(tasks) {
+  const container = document.getElementById('queue-items');
+  const currentArea = document.getElementById('queue-current');
+  const waitingTitle = document.getElementById('queue-waiting-title');
+
+  if (!tasks || tasks.length === 0) {
+    container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">暂无处理中的任务</div>';
+    currentArea.innerHTML = '';
+    waitingTitle.style.display = 'none';
+    return;
+  }
+
+  // 正在处理的那个（downloading 或 transcribing）
+  const current = tasks.find(t => t.status === 'downloading' || t.status === 'transcribing');
+  // 排队的（pending）
+  const waiting = tasks.filter(t => t.status === 'pending');
+  // 已完成的（done_deleted 或 failed）
+  const done = tasks.filter(t => t.status === 'done_deleted' || t.status === 'failed');
+
+  // 渲染当前处理中
+  if (current) {
+    const pct = current.progress || 0;
+    const elapsed = current.elapsed || 0;
+    const statusLabel = current.status === 'downloading' ? '音频下载中' : '音频转文字中';
+    currentArea.innerHTML = `
+      <div class="queue-current-card">
+        <div class="qc-title">🎧 ${escapeHtml(current.podcast_name)} — ${escapeHtml(current.name)}</div>
+        <div class="qc-progress-bar"><div class="qc-progress-fill" style="width:${pct}%"></div></div>
+        <div class="qc-meta">
+          <span class="qc-status">${statusLabel}</span>
+          <span class="qc-pct">${pct}%</span>
+          <span class="qc-time">已耗时 ${elapsed}秒</span>
+        </div>
+      </div>`;
+  } else {
+    currentArea.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-secondary);">暂无正在处理的任务</div>';
+  }
+
+  // 渲染排队列表
+  if (waiting.length > 0) {
+    waitingTitle.textContent = `排队中（共 ${waiting.length} 个）`;
+    waitingTitle.style.display = '';
+    container.innerHTML = waiting.map(task => {
+      return `<div class="queue-page-item status-pending">
+        <div class="qinfo">
+          <div class="qinfo-name">${escapeHtml(task.podcast_name)} — ${escapeHtml(task.name)}</div>
+        </div>
+        <span class="qstatus pending">排队中</span>
+      </div>`;
+    }).join('');
+  } else if (done.length > 0) {
+    // 没有等待中的任务，但有已完成的
+    waitingTitle.style.display = 'none';
+    // 直接渲染在 queue-items 内（不需要单独的 DOM 结构）
+    container.innerHTML = done.map(task => {
+      const isDone = task.status === 'done_deleted';
+      const isFailed = task.status === 'failed';
+      const timeStr = task.elapsed ? `用时 ${task.elapsed}秒` : '';
+      const errStr = isFailed && task.error ? ` — ${task.error}` : '';
+      const label = isDone ? '已完成' : '失败';
+      const cls = isDone ? 'done_deleted' : 'failed';
+      return `<div class="queue-page-item status-${cls}">
+        <div class="qinfo">
+          <div class="qinfo-name">${escapeHtml(task.podcast_name)} — ${escapeHtml(task.name)}</div>
+          ${timeStr || errStr ? `<div class="qinfo-sub">${timeStr}${errStr}</div>` : ''}
+        </div>
+        <span class="qstatus ${cls}">${label}</span>
+      </div>`;
+    }).join('');
+  } else {
+    waitingTitle.style.display = 'none';
+    container.innerHTML = '';
+  }
 }
 
 // ============ 视图切换 ============
 function showMainView() {
-  document.getElementById('main-view').style.display = '';
-  document.getElementById('queue-list-view').style.display = 'none';
-  document.getElementById('detail-view').style.display = 'none';
-}
-
-function showQueueView() {
-  loadQueue();
-  document.getElementById('main-view').style.display = 'none';
-  document.getElementById('queue-list-view').style.display = '';
-  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('main-view').classList.remove('hidden');
+  document.getElementById('detail-view').classList.add('hidden');
 }
 
 // ============ 删除播客 ============
@@ -1325,20 +1469,45 @@ async function refreshAll() {
   btn.classList.add('loading');
   btn.innerHTML = '⏳ 刷新中...';
 
+  let totalNew = 0;
+  let updatedPodcasts = [];
+
   try {
-    // 获取所有播客ID，依次刷新
     const rows = document.querySelectorAll('.row-main');
     for (const row of rows) {
       const pid = parseInt(row.dataset.podcast);
       try {
-        await fetch('/api/episodes/refresh', {
+        const resp = await fetch('/api/episodes/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ podcast_id: pid })
         });
+        const data = await resp.json();
+        if (data.ok && data.new_count > 0) {
+          totalNew += data.new_count;
+          updatedPodcasts.push({ name: data.podcast_name, newCount: data.new_count, pid });
+        }
       } catch (e) {}
     }
-    toast('刷新完成', 'success');
+
+    // 汇总弹窗
+    if (totalNew > 0) {
+      const lines = updatedPodcasts.map(p => `• ${p.name} 新增 ${p.new_count} 集`).join('\n');
+      toast(`🎉 ${updatedPodcasts.length} 个播客更新，共 ${totalNew} 条新集\n${lines}`, 'success');
+      // 更新红点：给有新集的播客加上红点
+      updatedPodcasts.forEach(p => {
+        const row = document.querySelector(`.row-main[data-podcast="${p.pid}"]`);
+        if (row && !row.querySelector('.new-badge')) {
+          const badge = document.createElement('span');
+          badge.className = 'new-badge';
+          badge.id = `badge-${p.pid}`;
+          const nameCell = row.querySelector('.podcast-name-cell');
+          nameCell.insertBefore(badge, nameCell.firstChild);
+        }
+      });
+    } else {
+      toast('刷新完成，暂无更新', 'info');
+    }
     location.reload();
   } catch (e) {
     toast('刷新失败', 'error');
@@ -1408,6 +1577,8 @@ async function addEpisode() {
     if (data.ok) {
       toast(`添加成功: ${data.name}`, 'success');
       closeDialogs();
+      // 清空剧集缓存，确保展开时重新加载最新数据
+      episodeCache = {};
       loadQueue();
     } else {
       toast('添加失败: ' + (data.error || '未知错误'), 'error');
@@ -1424,7 +1595,32 @@ async function addEpisode() {
 
 // ============ 加入队列 ============
 async function enqueueEpisode(episodeId, podcastId) {
+  // 防重：已经在排队中或处理中则忽略
+  const cached = episodeCache[podcastId]?.find(e => e.id === episodeId);
+  if (cached && ['queued', 'downloading', 'transcribing'].includes(cached.status)) {
+    return;
+  }
+
   try {
+    // 先立即更新本地缓存状态，避免等待API返回
+    if (episodeCache[podcastId]) {
+      const ep = episodeCache[podcastId].find(e => e.id === episodeId);
+      if (ep) {
+        ep.status = 'queued';  // queued 会显示"排队中"，SSE 更新后会变成正确的状态
+        // 立即刷新子表UI（乐观更新）
+        if (currentExpanded) {
+          const mainRow = currentExpanded.previousElementSibling;
+          if (mainRow && parseInt(mainRow.dataset.podcast) === podcastId) {
+            renderSubTable(podcastId, episodeCache[podcastId].slice(0, 5));
+          }
+        }
+        // 详情页也在显示的话，也要更新
+        if (detailPodcastId === podcastId) {
+          renderDetailPage();
+        }
+      }
+    }
+
     const resp = await fetch('/api/episodes/enqueue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1433,33 +1629,50 @@ async function enqueueEpisode(episodeId, podcastId) {
     const data = await resp.json();
     if (data.ok) {
       toast('已加入队列', 'success');
-      loadQueue();
+      // 不依赖 loadQueue/refreshSubTable 刷新子表——它们可能用旧数据覆盖
+      // SSE 事件会在任务状态变化时更新 UI
+      if (detailPodcastId === podcastId) {
+        renderDetailPage();
+      }
     } else {
+      // 回滚本地缓存状态
+      if (episodeCache[podcastId]) {
+        const ep = episodeCache[podcastId].find(e => e.id === episodeId);
+        if (ep) ep.status = 'pending';
+      }
       toast('加入队列失败: ' + (data.error || '未知错误'), 'error');
     }
   } catch (e) {
+    // 回滚本地缓存状态
+    if (episodeCache[podcastId]) {
+      const ep = episodeCache[podcastId].find(e => e.id === episodeId);
+      if (ep) ep.status = 'pending';
+    }
     toast('加入队列失败', 'error');
   }
 }
 
-// ============ 手动单集入队 ============
-async function enqueueManualEpisode(episodeId) {
+async function refreshPodcast(podcastId) {
+  const btn = document.querySelector(`button[onclick*="refreshPodcast(${podcastId})"]`);
+  if (btn) { btn.disabled = true; }
   try {
-    const resp = await fetch('/api/manual/enqueue', {
+    const resp = await fetch('/api/episodes/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ episode_id: episodeId })
+      body: JSON.stringify({ podcast_id: podcastId })
     });
     const data = await resp.json();
     if (data.ok) {
-      toast('已加入队列', 'success');
-      loadQueue();
-      location.reload();  // 刷新以更新手动单集状态
+      toast(`已刷新 "${data.podcast_name}"`, 'success');
+      // 刷新完成后重新拉取 episodes，更新缓存和 UI 数字
+      await refreshSubTable(podcastId);
     } else {
-      toast('加入队列失败: ' + (data.error || '未知错误'), 'error');
+      toast('刷新失败', 'error');
     }
   } catch (e) {
-    toast('加入队列失败', 'error');
+    toast('刷新失败', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; }
   }
 }
 
@@ -1506,6 +1719,22 @@ function clearViewedBadge(podcastId) {
 }
 
 // ============ 初始化 ============
+// 格式化主表格的日期列（显示月日时分秒）
+document.querySelectorAll('td.date-cell[data-date]').forEach(td => {
+  const d = td.dataset.date;
+  if (d) {
+    const date = new Date(d);
+    if (!isNaN(date)) {
+      const m = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      const hh = date.getHours().toString().padStart(2, '0');
+      const mm = date.getMinutes().toString().padStart(2, '0');
+      const ss = date.getSeconds().toString().padStart(2, '0');
+      td.textContent = `${m}-${day} ${hh}:${mm}:${ss}`;
+    }
+  }
+});
+
 document.getElementById('btn-delete-selected').addEventListener('click', doDeleteSelected);
 document.querySelectorAll('.dialog-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) closeDialogs(); });
@@ -1518,6 +1747,71 @@ document.querySelector('#add-dialog .btn-primary').addEventListener('click', add
 
 // 轮询队列
 setInterval(loadQueue, 3000);
+
+// SSE 实时更新：任务完成时刷新子表状态
+const homeEvtSource = new EventSource('/sse/stream');
+homeEvtSource.onerror = () => {
+  console.warn('[SSE] 连接断开，3秒后重连...');
+};
+homeEvtSource.addEventListener('task_update', (e) => {
+  const task = JSON.parse(e.data);
+  console.log('[SSE] task_update:', task.eid, task.status);
+  // 1. 更新 _tickerTasks（走马灯用的缓存）
+  const tIdx = window._tickerTasks.findIndex(t => t.eid === task.eid);
+  if (tIdx >= 0) {
+    window._tickerTasks[tIdx] = { ...window._tickerTasks[tIdx], ...task };
+  } else {
+    window._tickerTasks.push(task);
+  }
+  updateTicker(window._tickerTasks);
+
+  // 2. 更新 episodeCache 中对应 episode 的状态（不重新拉数据）
+  for (const podcastId of Object.keys(episodeCache)) {
+    const ep = episodeCache[podcastId].find(ep => ep.eid === task.eid);
+    if (ep) {
+      ep.status = task.status;
+      ep.progress = task.progress;
+      ep.elapsed = task.elapsed;
+      ep.status_text = task.status_text;
+    }
+  }
+  // 不在这里调用 renderSubTable —— loadQueue 的定时器会在 3 秒内覆盖
+  // 详情页需要更新（它是用户主动打开的视图）
+  if (detailPodcastId && episodeCache[detailPodcastId]?.find(ep => ep.eid === task.eid)) {
+    renderDetailPage();
+  }
+});
+homeEvtSource.addEventListener('task_done', async (e) => {
+  const task = JSON.parse(e.data);
+  console.log('[SSE] task_done:', task.eid);
+  // 1. 更新走马灯缓存
+  const tIdx = window._tickerTasks.findIndex(t => t.eid === task.eid);
+  if (tIdx >= 0) {
+    window._tickerTasks[tIdx].status = 'done_deleted';
+  }
+  updateTicker(window._tickerTasks);
+
+  // 2. 强制刷新用户当前可见的视图，不依赖 episodeCache（刷新后可能为空）
+  if (currentExpanded) {
+    const mainRow = currentExpanded.previousElementSibling;
+    if (mainRow && mainRow.classList.contains('row-main')) {
+      await refreshSubTable(parseInt(mainRow.dataset.podcast));
+    }
+  }
+  if (detailPodcastId) {
+    await refreshSubTable(detailPodcastId);
+    renderDetailPage();
+  }
+});
+
+homeEvtSource.addEventListener('task_new', (e) => {
+  const task = JSON.parse(e.data);
+  console.log('[SSE] task_new:', task.eid, task.status);
+  if (!window._tickerTasks.find(t => t.eid === task.eid)) {
+    window._tickerTasks.push(task);
+  }
+  updateTicker(window._tickerTasks);
+});
 
 // 初始加载队列
 loadQueue();
