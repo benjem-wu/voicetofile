@@ -137,7 +137,7 @@ function updateQueueUI(tasks) {
     currentArea.innerHTML = '<div class="card"><div class="empty">暂无正在处理的任务</div></div>';
   }
 
-  // 排队中：只看 DB 的 queued 任务（task_queue 里的任务正在被 worker 处理，不重复显示）
+  // 排队中：DB 的 queued 任务
   const queued = tasks.filter(t => t.status === 'queued');
   const queueArea = document.getElementById('queue-area');
   if (queued.length > 0) {
@@ -162,27 +162,17 @@ async function loadQueue() {
   try {
     const resp = await fetch('/api/queue');
     const data = await resp.json();
-    // 合并已有缓存（保留 SSE 更新的进度），只用 API 数据补充状态
+    // 纯 DB 数据，直接使用，不与 SSE 缓存 merge
     if (!window._cachedTasks) {
       window._cachedTasks = data.tasks || [];
     } else {
+      // 保留 SSE 更新的进度，只用 API 数据补充缺失任务
+      const cachedEids = new Set(window._cachedTasks.map(t => t.eid));
       for (const apiTask of (data.tasks || [])) {
-        const idx = window._cachedTasks.findIndex(t => t.eid === apiTask.eid);
-        if (idx >= 0) {
-          // 保留 SSE 更新的进度/时间，只用 API 数据更新状态
-          window._cachedTasks[idx] = {
-            ...window._cachedTasks[idx],
-            status: apiTask.status,
-            status_text: apiTask.status_text,
-            name: apiTask.name,
-            podcast_name: apiTask.podcast_name,
-            episode_id: apiTask.episode_id || apiTask.id,
-          };
-        } else {
+        if (!cachedEids.has(apiTask.eid)) {
           window._cachedTasks.push(apiTask);
         }
       }
-      // 不再移除已完成的任务——它们由 task_done 事件管理，永久保留
     }
     updateQueueUI(window._cachedTasks);
   } catch (e) {
@@ -190,22 +180,22 @@ async function loadQueue() {
   }
 }
 
-// SSE 任务更新事件：负责实时进度，同时能把不在缓存里的任务加进来（防止漏掉初始化前的任务）
+// SSE 任务更新事件：只更新已有任务，不在此创建（创建由 task_new 和 loadQueue 负责）
 evtSource.addEventListener('task_update', (e) => {
   if (!window._cachedTasks) return;
   const task = JSON.parse(e.data);
   const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
-  if (idx >= 0) {
-    window._cachedTasks[idx] = { ...window._cachedTasks[idx], ...task };
-  } else {
-    // 不在缓存里，加进来（处理初始化前已存在的 downloading 任务）
-    window._cachedTasks.push(task);
-  }
+  if (idx < 0) return; // task_update 不能创建任务，忽略；loadQueue 会补充
+  const cached = window._cachedTasks[idx];
+  const isTerminal = cached.status === 'done_deleted' || cached.status === 'failed';
+  if (isTerminal) return; // 终态不受任何覆盖
+  window._cachedTasks[idx] = { ...cached, ...task };
   updateQueueUI(window._cachedTasks);
 });
 
 evtSource.addEventListener('task_new', (e) => {
-  if (!window._cachedTasks) return;
+  // 即使 cache 未初始化也要处理（防止 loadQueue 前到达的 task_new 被丢弃）
+  if (!window._cachedTasks) window._cachedTasks = [];
   const task = JSON.parse(e.data);
   if (!window._cachedTasks.find(t => t.eid === task.eid)) {
     window._cachedTasks.push(task);

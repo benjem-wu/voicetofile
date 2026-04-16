@@ -388,6 +388,11 @@ python -m playwright install chromium
 | 2026-04-15 | 手动添加后子表未刷新 | 手动添加成功后清空 `episodeCache = {}`，下次展开时重新加载 |
 | 2026-04-15 | 手动添加后自动开始下载/转写，用户无控制权 | 手动添加只存入 DB 为 `pending` 状态，需点击"排队中"才会进入队列 |
 | 2026-04-15 | 失败任务无法重试 | 支持手动重试（点击"失败"链接），并自动重试 2 次后标记失败 |
+| 2026-04-16 | 多 Flask 实例同时运行，两个 worker 抢同一任务 | `msvcrt.locking` 文件锁 + PID 文件验证，禁止重复启动 |
+| 2026-04-16 | 残留任务（downloading/transcribing）重启后无法自动恢复 | `cleanup_stale_tasks()` 启动时直接删除残留任务，不影响新任务 |
+| 2026-04-16 | 进程被强制 kill 后锁文件残留，导致误报"已在运行中" | PID 文件里存 PID + `OpenProcess` 验证原进程是否存在，双重保险 |
+| 2026-04-16 | `get_next_queued_task()` 未返回 `podcast_name`，导致 txt 文件存到错误目录 | RETURNING 后额外 JOIN podcasts 表补充 `podcast_name` |
+| 2026-04-16 | 转写完成后 `status=done_deleted` 但 `txt_path` 为空，首页一直显示"未转化" | `mark_task_done(id, txt_path)` 增加 txt_path 参数，保存文件路径 |
 
 ---
 
@@ -408,12 +413,13 @@ python -m playwright install chromium
 
 ### 队列/UI 全面重构
 
-**队列架构**（重要）：
+**队列架构 v2**（重要）：
 - **单 worker 线程**：`_queue_worker` 用 `t.join()` 等待每次任务完成才取下一个，**同时只有 1 个任务在处理**
-- **内存队列 + DB 状态**：`task_queue` 是内存队列，保存正在处理的任务；DB 的 `queued` 状态表示已入队等待
-- **启动时清空**：`if __name__ == "__main__"` 时执行 `task_queue.clear()`，防止重启后残留显示
+- **DB 唯一数据源**：取消 `task_queue` 内存队列，所有状态存在 `episodes` 表
+- **启动时清理**：`cleanup_stale_tasks()` 删除 downloading/transcribing 残留任务（进程崩溃遗留，直接删除不留后患）
 - **状态分离**：`pending` = 未入队，`queued` = 已入队等待处理，`downloading`/`transcribing` = 正在处理
 - **停止机制**：`api_queue_stop` 设置全局 `_task_terminated=True`，处理线程检查此标志跳过重试，`finally` 不覆盖 DB 状态
+- **单实例保护**：启动时用 `msvcrt.locking` 文件锁 + PID 文件验证，保证同时只有 1 个 Flask 实例运行
 
 **手动添加行为变更**：手动添加单集不再自动开始下载/转写，只存入 DB 的 `pending` 状态，用户需主动点击"排队中"才会进入队列处理。
 
@@ -445,6 +451,98 @@ python -m playwright install chromium
 ### 子表/详情页对齐统一
 标题列左对齐，其余列（发布时间、音频长度、状态）居中对齐。
 
+## 19. 队列架构 v2（方案 B：DB 作为唯一数据源）
+
+> **架构原则**：取消内存队列 `task_queue`，所有任务状态统一存在 `episodes` 表。Flask 重启不丢状态，状态只有一份不存在同步问题。
+
+### 核心设计
+
+| 组件 | 变化 |
+|------|------|
+| 内存队列 `task_queue` | **删除** |
+| 线程锁 `queue_lock` | **删除** |
+| 状态来源 | DB `episodes.status` 唯一数据源 |
+| Worker 取任务 | `db.get_next_queued_task()` — 原子 SQL（`UPDATE ... RETURNING`） |
+| Flask 重启恢复 | `db.cleanup_stale_tasks()` 启动时删除 `downloading`/`transcribing` 残留任务（不留后患） |
+| 子进程超时 | 所有 `subprocess.run/wait()` 加 `timeout`（下载 30 分钟 / 转写 2 小时） |
+| 强制停止 | `_proc_to_kill.kill()` + `task_terminated` 标志 |
+| 单实例保护 | `msvcrt.locking` 文件锁 + PID 文件验证（Windows） |
+
+### 数据库改动
+
+```sql
+ALTER TABLE episodes ADD COLUMN progress INTEGER DEFAULT 0;
+```
+
+### db.py 新增函数
+
+| 函数 | 作用 |
+|------|------|
+| `get_next_queued_task()` | 原子抢任务：`queued → downloading`，返回任务（含 `podcast_name`，通过 JOIN 查询） |
+| `enqueue_task(id)` | `pending/failed → queued` |
+| `update_task_progress(id, progress)` | 更新转写进度（0-100） |
+| `cleanup_stale_tasks()` | 启动时删除残留任务（downloading/transcribing），返回删除数量 |
+| `mark_task_done(id, txt_path)` | `downloading/transcribing → done_deleted`，progress=100，同时记录 txt 路径 |
+| `mark_task_failed(id, error_msg)` | `downloading/transcribing → failed`，progress=0 |
+| `get_queue_status()` | 返回各状态数量统计 |
+
+### Worker 循环（改造后）
+
+```python
+def _queue_worker():
+    while True:
+        task = db.get_next_queued_task()
+        if task:
+            _start_task_thread(task)  # t.join() 阻塞，等待任务完全结束
+        else:
+            time.sleep(2)
+```
+
+### 超时保护
+
+- `_do_download`：timeout=1800秒（30分钟）
+- `_do_transcribe`：timeout=7200秒（2小时）
+- 超时后 `proc.kill()` 强制杀死进程，GPU 显存立即释放
+
+### 状态流转
+
+```
+Flask 启动
+    │
+    ▼
+cleanup_stale_tasks()          ← downloading/transcribing 直接删除（不留后患）
+    │
+    ▼
+Worker 启动（while True）
+    │
+    ▼
+get_next_queued_task()      ← queued → downloading（原子）
+    │
+    ▼
+_do_download(timeout=30min)
+    │
+    ▼
+_do_transcribe(timeout=2hr)  ← 实时 update_task_progress()
+    │
+    ▼
+mark_task_done()             ← done_deleted, progress=100
+    │
+    ▼
+loop → get_next_queued_task()
+```
+
+### 与旧架构的对比
+
+| 对比项 | 旧架构（v1） | 新架构（v2） |
+|--------|------------|------------|
+| 任务队列 | `task_queue` 内存 + DB 双份 | DB 唯一 |
+| 状态同步 | 需 merge 两个来源 | 无需同步 |
+| Flask 重启 | `task_queue` 丢失 | 状态保留在 DB |
+| 残留任务 | 需手动清理 | `cleanup_stale_tasks()` 启动时自动删除 |
+| 子进程卡死 | 永久阻塞 | timeout 后 kill |
+| 停止任务 | 只能请求，无法强制 | `proc.kill()` 强制 |
+| 多实例启动 | 无保护，可同时跑多个 | `msvcrt.locking` 文件锁禁止 |
+
 ---
 
-*最后更新：2026-04-16*
+*最后更新：2026-04-16（v1.0）*

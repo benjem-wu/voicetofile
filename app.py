@@ -4,6 +4,8 @@ VoiceToFile — 小宇宙播客转文字
 """
 import os
 import sys
+import signal
+import ctypes
 import json
 import time
 import logging
@@ -36,16 +38,15 @@ app.config['JSON_AS_ASCII'] = False
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("app")
 
-# --------------- 全局状态 ---------------
+# --------------- 全局状态（队列 v2）---------------
 
-# 任务队列：[{"eid", "name", "podcast_id", "podcast_name", "status", "progress", "elapsed", "error"}]
-task_queue = []
-queue_lock = threading.Lock()
-queue_wakeup = threading.Event()  # 用于唤醒 queue worker
-stop_event = threading.Event()    # 终止当前任务信号
-current_task_thread = None        # 当前处理线程
-current_subprocess = None         # 当前 subprocess 引用（用于 kill）
-_task_terminated = False          # 标记当前任务已被 api_queue_stop 提前终止（避免 finally 重复覆盖）
+# 当前 subprocess 引用（用于 kill）
+_proc_to_kill = None
+# 标记当前任务已被 api_queue_stop 提前终止
+_task_terminated = False
+# SSE 订阅者
+sse_subscribers = []
+sse_lock = threading.Lock()
 
 # SSE 订阅者：{"event": "message", "data": {...}}
 sse_subscribers = []
@@ -84,13 +85,8 @@ def addLog(text: str, log_type: str = "tag"):
 
 
 def task_update(eid: str, **kwargs):
-    """更新任务状态并推送 SSE"""
-    with queue_lock:
-        for t in task_queue:
-            if t["eid"] == eid:
-                t.update(kwargs)
-                broadcast_sse("task_update", t)
-                break
+    """更新任务状态并推送 SSE（直接广播，不依赖 task_queue）"""
+    broadcast_sse("task_update", {"eid": eid, **kwargs})
 
 
 # --------------- SSE 路由 ---------------
@@ -198,39 +194,38 @@ def queue_page():
         # 移除按钮：恢复为 pending 状态
         episode_id = request.form.get("episode_id", type=int)
         if episode_id:
-            ep = db.get_episode_by_id(episode_id)
-            if ep:
-                db.update_episode_status(episode_id, "pending", txt_path="", error_msg="")
-                with queue_lock:
-                    for i, t in enumerate(task_queue):
-                        if t["episode_id"] == episode_id:
-                            task_queue.pop(i)
-                            break
+            db.update_episode_status(episode_id, "pending", txt_path="", error_msg="")
         return redirect(url_for("queue_page"))
 
-    with queue_lock:
-        all_queue_tasks = list(task_queue)
-    # 正在处理：优先从 task_queue（downloading/transcribing），也查 DB（防止 Flask 重启后丢失）
-    active = [t for t in all_queue_tasks if t.get("status") in ("downloading", "transcribing")]
-    active_eids = {t["eid"] for t in active}
-    # 从 DB 补充正在处理的任务（Flask 重启后 task_queue 为空，但 DB 状态还在）
-    db_active = db.get_conn().execute("""
-        SELECT e.*, p.name as podcast_name
-        FROM episodes e
-        JOIN podcasts p ON e.podcast_id = p.id
-        WHERE e.status IN ('downloading', 'transcribing')
-    """).fetchall()
-    for row in db_active:
-        rd = dict(row)
-        if rd["eid"] not in active_eids:
-            active.append(rd)
-            active_eids.add(rd["eid"])
-    # 排队中：task_queue 里的 pending/queued 任务 + DB 里的 queued 任务
-    in_queue = [t for t in all_queue_tasks if t.get("status") in ("pending", "queued")]
-    all_pending = db.get_pending_episodes()
-    pending = [p for p in all_pending if p["eid"] not in active_eids]
+    # 正在处理：downloading + transcribing（纯 DB）
+    conn = db.get_conn()
+    try:
+        cur = conn.execute("""
+            SELECT e.*, p.name as podcast_name
+            FROM episodes e
+            JOIN podcasts p ON e.podcast_id = p.id
+            WHERE e.status IN ('downloading', 'transcribing')
+        """)
+        active = [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+    # 排队中：queued（纯 DB）
+    conn = db.get_conn()
+    try:
+        cur = conn.execute("""
+            SELECT e.*, p.name as podcast_name
+            FROM episodes e
+            JOIN podcasts p ON e.podcast_id = p.id
+            WHERE e.status = 'queued'
+            ORDER BY e.created_at ASC
+        """)
+        in_queue = [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
     done = db.get_recently_completed_episodes(limit=20)
-    return render_template("queue.html", active=active, pending=pending, in_queue=in_queue, done=done)
+    return render_template("queue.html", active=active, pending=in_queue, in_queue=in_queue, done=done)
 
 
 @app.route("/podcast/<int:podcast_id>")
@@ -457,8 +452,15 @@ def api_enqueue_episodes():
     addLog(f"[队列] 加入 {len(to_enqueue)} 集: {podcast['name']}", "tag")
 
     for ep in to_enqueue:
-        db.update_episode_status(ep["id"], "queued")
-        _enqueue_task(ep, podcast)
+        db.enqueue_task(ep["id"])
+        # 广播新任务入队（让前端及时看到）
+        broadcast_sse("task_new", {
+            "eid": ep["eid"],
+            "name": ep["name"],
+            "podcast_name": podcast["name"],
+            "status": "queued",
+            "progress": 0,
+        })
 
     return jsonify({"ok": True, "count": len(to_enqueue)})
 
@@ -525,12 +527,6 @@ def api_homepage_status():
     返回 {episodeId: status} 格式，仅包含非终态的任务。
     """
     statuses = {}
-    # 从 task_queue 取活跃任务
-    with queue_lock:
-        for t in task_queue:
-            if t.get("status") not in ("done", "failed"):
-                statuses[str(t["episode_id"])] = t["status"]
-    # 从 DB 补充 downloading/transcribing/queued 状态
     conn = db.get_conn()
     try:
         cur = conn.cursor()
@@ -589,11 +585,7 @@ def api_retry_episode(episode_id: int):
         return jsonify({"ok": False, "error": f"当前状态 {ep['status']} 不支持重试"})
 
     db.reset_episode_for_retry(episode_id)
-    podcast = db.get_conn().execute(
-        "SELECT * FROM podcasts WHERE id = ?", (ep["podcast_id"],)
-    ).fetchone()
-    ep_fresh = db.get_episode_by_id(episode_id)
-    _enqueue_task(ep_fresh, dict(podcast))
+    db.enqueue_task(episode_id)
     return jsonify({"ok": True})
 
 
@@ -621,48 +613,24 @@ def api_dequeue_episode():
     if not ep:
         return jsonify({"ok": False, "error": "Episode 不存在"})
     db.update_episode_status(episode_id, "pending", txt_path="", error_msg="")
-    with queue_lock:
-        for i, t in enumerate(task_queue):
-            if t["episode_id"] == episode_id:
-                task_queue.pop(i)
-                break
     return jsonify({"ok": True})
 
 
 @app.route("/api/queue/stop", methods=["GET", "POST"])
 def api_queue_stop():
     """终止当前正在处理的任务"""
-    global _task_terminated
-    with queue_lock:
-        thread = current_task_thread
-        subp = current_subprocess
+    global _task_terminated, _proc_to_kill
 
-# 没有任务在跑，直接刷新页面
-    if thread is None:
-        return """<html><body>
-<meta http-equiv="refresh" content="0;url=/queue">
-</body></html>"""
-
-    # 立即设置终止标记，防止 finally 块重复覆盖状态
+    # 设置终止标记
     _task_terminated = True
 
-    # 立即从 task_queue 和 DB 中移除，防止竞态被 worker 重新拾取
-    with queue_lock:
-        for i, t in enumerate(task_queue):
-            db.update_episode_status(t["episode_id"], "failed", error_msg="已终止")
-            task_update(t["eid"], status="failed", error="已终止")
-            task_queue.pop(i)
-            break
-
-    stop_event.set()
-    if subp is not None:
+    # 强制 kill 子进程（如果有）
+    if _proc_to_kill is not None:
         try:
-            subp.kill()
+            _proc_to_kill.kill()
         except Exception:
             pass
-
-    # 同步等待处理线程结束（最多等 10 秒）
-    thread.join(timeout=10)
+        _proc_to_kill = None
 
     # 返回简单 HTML，3秒后跳转
     return """<html><body>
@@ -675,96 +643,40 @@ def api_queue_stop():
 
 @app.route("/api/queue")
 def api_queue():
-    """获取当前队列状态"""
-    # 正在处理：优先从 task_queue 取，同时从 DB 补充（防止任务被 worker 取走后 task_queue 为空的情况）
-    with queue_lock:
-        active = [t for t in task_queue if t.get("status") in ("downloading", "transcribing")]
-    active_eids = {t["eid"] for t in active}
-    # 从 DB 补充 downloading/transcribing 状态的任务
+    """获取当前队列状态（纯 DB，无 task_queue）"""
     conn = db.get_conn()
     try:
-        cur = conn.cursor()
-        cur.execute("""
+        cur = conn.execute("""
             SELECT e.*, p.name as podcast_name
             FROM episodes e
             JOIN podcasts p ON e.podcast_id = p.id
-            WHERE e.status IN ('downloading', 'transcribing')
+            WHERE e.status IN ('downloading', 'transcribing', 'queued', 'done_deleted', 'failed')
+            ORDER BY e.updated_at DESC
+            LIMIT 50
         """)
-        for row in cur.fetchall():
-            rd = dict(row)
-            if rd["eid"] not in active_eids:
-                active.append(rd)
-                active_eids.add(rd["eid"])
+        tasks = [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
-
-    # 排队中：task_queue 里的 pending/queued + DB 里的 queued
-    with queue_lock:
-        in_queue = [t for t in task_queue if t.get("status") in ("pending", "queued")]
-    in_queue_eids = {t["eid"] for t in in_queue}
-    all_pending = db.get_pending_episodes()
-    pending_eids = set()
-    pending = []
-    for p in all_pending:
-        if p["eid"] not in active_eids and p["eid"] not in in_queue_eids and p["eid"] not in pending_eids:
-            pending_eids.add(p["eid"])
-            pending.append(p)
-    # 从 DB 补充 queued 状态（也要去重）
-    conn = db.get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT e.*, p.name as podcast_name FROM episodes e JOIN podcasts p ON e.podcast_id = p.id WHERE e.status = 'queued'")
-        for row in cur.fetchall():
-            rd = dict(row)
-            if rd["eid"] not in active_eids and rd["eid"] not in in_queue_eids and rd["eid"] not in pending_eids:
-                pending.append(rd)
-    finally:
-        conn.close()
-
-    # 从 DB 查询最近完成的任务（重启后仍能保留历史记录）
-    done = db.get_recently_completed_episodes(limit=20)
-    return jsonify({"tasks": active + pending + done})
+    return jsonify({"tasks": tasks})
 
 
-# --------------- 任务队列处理 ---------------
+# --------------- 任务队列处理（v2：DB 唯一数据源）---------------
 
-def _enqueue_task(episode: dict, podcast: dict):
-    """将 episode 加入任务队列（仅入队，不启动处理；由 worker 每次取一个处理）"""
-    task = {
-        "eid": episode["eid"],
-        "episode_id": episode["id"],
-        "name": episode["name"],
-        "podcast_id": episode["podcast_id"],
-        "podcast_name": podcast["name"],
-        "status": "pending",
-        "progress": 0,
-        "elapsed": 0,
-        "error": "",
-        "start_time": None,
-        "retry_count": 0,
-    }
-    with queue_lock:
-        # 避免重复入队
-        for t in task_queue:
-            if t["eid"] == episode["eid"] and t["status"] not in ("done", "failed"):
-                return
-        task_queue.append(task)
-    broadcast_sse("task_new", task)
-    queue_wakeup.set()
-
-
-def _process_task(task: dict, sevt: threading.Event):
-    """在独立线程中处理单个 episode 的完整流程：下载 → 转写 → 清理"""
-    global current_subprocess, _task_terminated
-    episode_id = task["episode_id"]
+def _process_task(task: dict):
+    """
+    在独立线程中处理单个 episode 的完整流程：下载 → 转写 → 清理。
+    所有状态变更通过 db.* 函数，不操作 task_queue。
+    """
+    global _proc_to_kill, _task_terminated
+    episode_id = task["id"]
     eid = task["eid"]
-    podcast_name = task["podcast_name"]
+    podcast_name = task.get("podcast_name", task.get("name", ""))
     episode_name = task["name"]
-    final_status = "transcribing"
-
     output_dir = get_output_dir(podcast_name)
-    task_update(eid, status="downloading", progress=0, start_time=time.time())
-    db.update_episode_status(episode_id, "downloading")
+    start_time = time.time()
+
+    # 通知前端开始下载
+    task_update(eid, status="downloading", progress=0, elapsed=0)
 
     try:
         # ---- 获取音频 URL ----
@@ -774,66 +686,51 @@ def _process_task(task: dict, sevt: threading.Event):
             raise ValueError("无法获取音频 URL")
         if ep_detail.is_paid:
             raise ValueError(f"该集为付费内容（{ep_detail.paid_price}），跳过")
-
-        if sevt.is_set():
+        if _task_terminated:
             raise ValueError("已终止")
-
-        audio_url = ep_detail.audio_url
-        pid = ep_detail.pid
 
         # ---- 下载音频 ----
         dl = downloader.Downloader(output_dir)
-        dl_result = dl.download(audio_url, episode_name, eid)
+        dl_result = dl.download(ep_detail.audio_url, episode_name, eid)
         if not dl_result["ok"]:
             raise ValueError(f"下载失败: {dl_result.get('error', '未知错误')}")
 
-        if sevt.is_set():
+        if _task_terminated:
             dl.cleanup_progress(eid)
             raise ValueError("已终止")
 
         audio_file = dl_result["file"]
-        elapsed_dl = time.time() - (task.get("start_time") or time.time())
+        elapsed_dl = time.time() - start_time
         task_update(eid, progress=30, elapsed=int(elapsed_dl))
 
         # ---- 转写 ----
         addLog(f"[转写] {episode_name[:30]}...", "tag")
         task_update(eid, status="transcribing", progress=50)
-        db.update_episode_status(episode_id, "transcribing")
+        db.update_task_progress(episode_id, 50)
 
-        # 写一个 wrapper 的 progress 回调（transcriber 自己管理进度）
-        def progressWatcher():
-            import time
-            for _ in range(200):
-                if sevt.is_set():
-                    return
-                time.sleep(30)
-                pfile = output_dir / f"_transcribe_progress_{os.getpid()}.txt"
-                if pfile.exists():
-                    try:
-                        pct = int(pfile.read_text(encoding='utf-8').strip())
-                        task_update(eid, progress=50 + int(pct * 0.5))
-                    except Exception:
-                        pass
+        # 调用转写（子进程，带超时保护）
+        sub_result = _run_transcriber_subprocess(
+            audio_file, output_dir, episode_name,
+            ep_detail.audio_url, eid, episode_id,
+            timeout=7200  # 2小时超时
+        )
 
-        progress_thread = threading.Thread(target=progressWatcher, daemon=True)
-        progress_thread.start()
-
-        # 调用转写（子进程）
-        sub_result = _run_transcriber_subprocess(audio_file, output_dir, episode_name, ep_detail.audio_url, eid, sevt)
-
-        if sevt.is_set():
+        if _task_terminated:
             raise ValueError("已终止")
 
         if not sub_result["ok"]:
             raise ValueError(f"转写失败: {sub_result.get('error', '未知错误')}")
 
         txt_file = sub_result.get("file", "")
-        total_elapsed = time.time() - (task.get("start_time") or time.time())
+        total_elapsed = time.time() - start_time
 
         # ---- 更新 DB ----
-        db.update_episode_status(episode_id, "done_deleted", txt_path=txt_file)
-        final_status = "done_deleted"
+        db.mark_task_done(episode_id, txt_file)
         task_update(eid, status="done_deleted", progress=100, elapsed=int(total_elapsed))
+        broadcast_sse("task_done", {
+            "eid": eid, "name": episode_name,
+            "podcast_name": podcast_name, "status": "done_deleted"
+        })
         addLog(f"[完成] {episode_name[:30]}，用时 {int(total_elapsed)}秒，已删除音频", "done")
 
         # ---- 清理 ----
@@ -844,121 +741,52 @@ def _process_task(task: dict, sevt: threading.Event):
             pass
 
     except Exception as e:
-        total_elapsed = time.time() - (task.get("start_time") or time.time())
+        total_elapsed = time.time() - start_time
         err_msg = str(e)
         addLog(f"[失败] {episode_name[:30]}: {err_msg}", "err")
 
         retry_count = task.get("retry_count", 0)
-        if retry_count < 2 and not sevt.is_set() and not _task_terminated:
-            # 自动重试：重新入队，等 worker 再次处理
-            task["retry_count"] = retry_count + 1
-            task["status"] = "queued"
-            task["progress"] = 0
-            task["error"] = err_msg
-            task["elapsed"] = 0
-            task["start_time"] = None
-            db.update_episode_status(episode_id, "queued")
-            addLog(f"[重试] {episode_name[:30]} 第{retry_count+1}次，将在完成后重新加入队列", "tag")
-            queue_wakeup.set()
+        if retry_count < 2 and not _task_terminated:
+            # 自动重试：重新入队
+            db.enqueue_task(episode_id)
+            addLog(f"[重试] {episode_name[:30]} 第{retry_count+1}次", "tag")
+            broadcast_sse("task_done", {
+                "eid": eid, "name": episode_name,
+                "podcast_name": podcast_name, "status": "queued"
+            })
             return
 
         # 超过2次重试或已终止，标记为失败
-        db.update_episode_status(episode_id, "failed", error_msg=err_msg)
-        final_status = "failed"
+        db.mark_task_failed(episode_id, err_msg)
         task_update(eid, status="failed", elapsed=int(total_elapsed), error=err_msg)
-
-    finally:
-        with queue_lock:
-            for i, t in enumerate(task_queue):
-                if t["eid"] == eid:
-                    task_queue.pop(i)
-                    break
-        current_subprocess = None
+        broadcast_sse("task_done", {
+            "eid": eid, "name": episode_name,
+            "podcast_name": podcast_name, "status": "failed"
+        })
 
 
 def _queue_worker():
-    """后台 worker：优先从 task_queue 取任务，队列空时从 DB 补充"""
+    """后台 worker：永远只从 DB 抢任务（db.get_next_queued_task 原子操作）"""
+    print("[队列] Worker 线程已启动")
     while True:
-        queue_wakeup.wait(timeout=3)
-        queue_wakeup.clear()
-
-        # 优先从 task_queue 取 pending/queued 任务
-        with queue_lock:
-            pending = [t for t in task_queue if t.get("status") in ("pending", "queued")]
-            if pending:
-                task = pending[0]
-                task_queue.remove(task)
-            else:
-                task = None
-
+        task = db.get_next_queued_task()
         if task:
-            # 从 task_queue 取到的任务（DB 状态已是 queued），直接启动处理
+            print(f"[队列] 拾取任务: {task['name']} (id={task['id']})")
             _start_task_thread(task)
-            continue
-
-        # task_queue 为空，从 DB 补充
-        conn = db.get_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT e.*, p.name as podcast_name
-                FROM episodes e
-                JOIN podcasts p ON e.podcast_id = p.id
-                WHERE e.status = 'queued'
-                ORDER BY e.created_at ASC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
-        finally:
-            conn.close()
-
-        if not row:
-            continue
-
-        ep = dict(row)
-
-        task = {
-            "eid": ep["eid"],
-            "episode_id": ep["id"],
-            "name": ep["name"],
-            "podcast_id": ep["podcast_id"],
-            "podcast_name": ep["podcast_name"],
-            "status": "pending",
-            "progress": 0,
-            "elapsed": 0,
-            "error": "",
-            "start_time": None,
-            "retry_count": 0,
-        }
-        with queue_lock:
-            for t in task_queue:
-                if t["eid"] == ep["eid"] and t["status"] in ("downloading", "transcribing"):
-                    task = None
-                    break
-            if task:
-                task_queue.append(task)
-        if task:
-            _start_task_thread(task)
+        else:
+            time.sleep(2)
 
 
 def _start_task_thread(task: dict):
-    """启动任务处理线程（统一入口）"""
-    db.update_episode_status(task["episode_id"], "downloading")
-    task_update(task["eid"], status="downloading", progress=0, start_time=time.time())
-    stop_event.clear()
-    t = threading.Thread(target=_process_task, args=(task, stop_event), daemon=True)
-    with queue_lock:
-        current_task_thread = t
+    """启动任务处理线程"""
+    t = threading.Thread(target=_process_task, args=(task,), daemon=True)
     t.start()
     t.join()
-    with queue_lock:
-        current_task_thread = None
-        current_subprocess = None
 
 
-def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name: str, episode_url: str, eid: str, sevt: threading.Event) -> dict:
-    """启动子进程运行转写"""
-    global current_subprocess
+def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name: str, episode_url: str, eid: str, episode_id: int, timeout: int = 7200) -> dict:
+    """启动子进程运行转写，带超时保护"""
+    global _proc_to_kill
     transcriber_py = Path(__file__).parent / "transcriber.py"
 
     cmd = [
@@ -988,51 +816,63 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
         encoding='utf-8',
         errors='replace',
     )
-    current_subprocess = proc
+    _proc_to_kill = proc
 
-    while True:
-        if sevt.is_set():
-            proc.terminate()
-            proc.wait()
-            return {"ok": False, "error": "已终止"}
-        line = proc.stdout.readline()
-        if not line and proc.poll() is not None:
-            break
-        if line.startswith("STATUS:"):
-            try:
-                msg = json.loads(line[7:])
-                event = msg.get("event", "")
-                data = msg.get("data", "")
-                if event == "status":
-                    import re as _re
-                    m = _re.search(r'\[(\d+)%\]', str(data))
-                    if m:
-                        pct = int(m.group(1))
-                        task_update(eid, progress=pct, status_text=str(data))
-            except Exception:
-                pass
-        elif line.startswith("RESULT:"):
-            try:
-                result = json.loads(line[7:])
+    try:
+        while True:
+            if _task_terminated:
+                proc.terminate()
+                proc.wait()
+                return {"ok": False, "error": "已终止"}
+            line = proc.stdout.readline()
+            if not line and proc.poll() is not None:
+                break
+            if line.startswith("STATUS:"):
                 try:
-                    result_file = output_dir / f"_transcribe_result_{proc.pid}.json"
-                    result_file.unlink(missing_ok=True)
+                    msg = json.loads(line[7:])
+                    event = msg.get("event", "")
+                    data = msg.get("data", "")
+                    if event == "status":
+                        import re as _re
+                        m = _re.search(r'\[(\d+)%\]', str(data))
+                        if m:
+                            pct = int(m.group(1))
+                            task_update(eid, progress=pct, status_text=str(data))
+                            # 同步更新 DB
+                            db.update_task_progress(episode_id, pct)
                 except Exception:
                     pass
-                return result
-            except Exception:
-                pass
+            elif line.startswith("RESULT:"):
+                try:
+                    result = json.loads(line[7:])
+                    try:
+                        result_file = output_dir / f"_transcribe_result_{proc.pid}.json"
+                        result_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    return result
+                except Exception:
+                    pass
 
-    proc.wait()
-    if proc.returncode != 0:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        return {"ok": False, "error": f"子进程返回码 {proc.returncode}: {stderr[:200]}"}
-    try:
-        result_file = output_dir / f"_transcribe_result_{proc.pid}.json"
-        result_file.unlink(missing_ok=True)
-    except Exception:
-        pass
-    return {"ok": False, "error": "未收到结果"}
+        # 带超时等待
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return {"ok": False, "error": f"转写超时（{timeout}秒）"}
+
+        if proc.returncode != 0:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            return {"ok": False, "error": f"子进程返回码 {proc.returncode}: {stderr[:200]}"}
+        try:
+            result_file = output_dir / f"_transcribe_result_{proc.pid}.json"
+            result_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {"ok": False, "error": "未收到结果"}
+    finally:
+        _proc_to_kill = None
 
 
 # --------------- 刷新按钮功能 ---------------
@@ -1055,32 +895,93 @@ def api_refresh():
     return jsonify({"ok": True})
 
 
+# --------------- 单实例保护 ---------------
+
+PID_FILE = Path(__file__).parent / ".voicetofile.pid"
+LOCK_FILE = Path(__file__).parent / ".voicetofile.lock"
+_lock_fd = None
+
+def _is_process_running(pid: int) -> bool:
+    """Windows 上检查进程是否存在"""
+    kernel32 = ctypes.windll.kernel32
+    SYNCHRONIZE = 0x00100000
+    return kernel32.OpenProcess(SYNCHRONIZE, 0, pid) != 0
+
+def _acquire_lock():
+    """尝试获取文件锁，保证同一时刻只有一个实例运行"""
+    global _lock_fd
+    import msvcrt
+    try:
+        _lock_fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
+        msvcrt.locking(_lock_fd, msvcrt.LK_NBLCK, 1)
+        return True
+    except (IOError, OSError):
+        if _lock_fd is not None:
+            os.close(_lock_fd)
+            _lock_fd = None
+        return False
+
+def _release_lock():
+    """释放文件锁"""
+    global _lock_fd
+    import msvcrt
+    if _lock_fd is not None:
+        try:
+            msvcrt.locking(_lock_fd, msvcrt.LK_UNLCK, 1)
+            os.close(_lock_fd)
+        except OSError:
+            pass
+        _lock_fd = None
+        try:
+            LOCK_FILE.unlink()
+        except OSError:
+            pass
+
 # --------------- 初始化 ---------------
 
 if __name__ == "__main__":
+    # 单实例保护：优先用锁文件，锁文件残留时用 PID 文件兜底
+    if not _acquire_lock():
+        # 锁获取失败（可能锁文件残留），检查 PID 文件里进程是否还活着
+        if PID_FILE.exists():
+            try:
+                old_pid = int(PID_FILE.read_text().strip())
+                if _is_process_running(old_pid):
+                    print("[错误] VoiceToFile 已在运行中，请先关闭后再启动")
+                    exit(1)
+                print("[警告] 发现残留 PID 文件，已清理")
+                PID_FILE.unlink()
+            except (ValueError, OSError):
+                if PID_FILE.exists():
+                    PID_FILE.unlink()
+        # 再次尝试获取锁
+        if not _acquire_lock():
+            print("[错误] VoiceToFile 已在运行中，请先关闭后再启动")
+            exit(1)
+
+    PID_FILE.write_text(str(os.getpid()))
+
+    def _cleanup(signum, frame):
+        _release_lock()
+        if PID_FILE.exists():
+            try:
+                PID_FILE.unlink()
+            except OSError:
+                pass
+        sys.exit(0)
+    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
     # 初始化数据库并确保虚拟播客存在
     db.init_db()
     db.get_or_create_manual_podcast()
 
-    # 启动队列 worker（单线程，每次只处理一个任务）
-    # 启动时清空 task_queue，防止 Flask 重启后的残留任务显示
-    with queue_lock:
-        task_queue.clear()
+    # 启动时清理残留任务：downloading/transcribing 直接删除（进程崩溃遗留，不留后患）
+    stale = db.cleanup_stale_tasks()
+    if stale > 0:
+        print(f"[队列] 已删除 {stale} 个残留任务")
 
-    # 启动时清理卡住的状态：downloading/transcribing -> queued
-    # （Flask 重启前可能正在处理，重启后 DB 状态残留）
-    conn = db.get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE episodes
-        SET status = 'queued'
-        WHERE status IN ('downloading', 'transcribing')
-    """)
-    count = cur.rowcount
-    conn.commit()
-    conn.close()
-    if count > 0:
-        print(f"[队列] 重置了 {count} 个卡住的任务为排队状态")
+    # 启动队列 worker（单线程，每次只处理一个任务）
     t = threading.Thread(target=_queue_worker, daemon=True, name="QueueWorker")
     t.start()
     print(f"[队列] Worker 线程已启动 (alive={t.is_alive()})")

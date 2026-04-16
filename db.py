@@ -58,6 +58,11 @@ def init_db():
             cur.execute("ALTER TABLE episodes ADD COLUMN source TEXT NOT NULL DEFAULT 'subscribe'")
         except sqlite3.OperationalError:
             pass  # 列已存在
+        # 兼容已有数据库：progress 列可能不存在
+        try:
+            cur.execute("ALTER TABLE episodes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
 
         # 索引加速查询
         cur.execute("""
@@ -412,6 +417,143 @@ def get_pending_episodes(limit: int = 50) -> list[dict]:
             LIMIT ?
         """, (limit,))
         return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# --------------- 队列 v2（DB 唯一数据源）---------------
+
+def get_next_queued_task() -> Optional[dict]:
+    """
+    原子操作：抢一个 queued 任务，标记为 downloading，同时返回任务信息。
+    使用 UPDATE ... RETURNING（SQLite 3.35+），保证并发安全。
+    如果没有 queued 任务，返回 None。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            UPDATE episodes
+            SET status = 'downloading', progress = 0, updated_at = ?
+            WHERE id = (
+                SELECT id FROM episodes
+                WHERE status = 'queued'
+                ORDER BY created_at ASC
+                LIMIT 1
+            )
+            RETURNING id, eid, name, podcast_id, status
+        """, (datetime.now().isoformat(),))
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return None
+        task = dict(row)
+        # 补充 podcast_name（get_output_dir 需要）
+        cur2 = conn.execute("SELECT name FROM podcasts WHERE id = ?", (task["podcast_id"],))
+        pRow = cur2.fetchone()
+        task["podcast_name"] = pRow["name"] if pRow else ""
+        return task
+    finally:
+        conn.close()
+
+
+def enqueue_task(episode_id: int) -> bool:
+    """
+    将 pending/failed 状态改为 queued（入队）。
+    返回 True 表示入队成功，False 表示状态不允许（如已在队列中）。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            UPDATE episodes
+            SET status = 'queued', updated_at = ?
+            WHERE id = ? AND status IN ('pending', 'failed')
+        """, (datetime.now().isoformat(), episode_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_task_progress(episode_id: int, progress: int):
+    """更新转写进度（0-100）"""
+    conn = get_conn()
+    try:
+        conn.execute("""
+            UPDATE episodes SET progress = ?, updated_at = ?
+            WHERE id = ?
+        """, (progress, datetime.now().isoformat(), episode_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def cleanup_stale_tasks() -> int:
+    """
+    Flask 启动时调用。
+    删除 downloading/transcribing 状态的残留任务（进程崩溃/强制退出后遗留）。
+    这些任务的音频/显存可能已泄漏，直接删除不留后患。
+    返回删除的任务数量。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            DELETE FROM episodes
+            WHERE status IN ('downloading', 'transcribing')
+        """)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def mark_task_done(episode_id: int, txt_path: str = ""):
+    """处理完成：downloading/transcribing → done_deleted，progress=100，同时记录 txt 路径"""
+    conn = get_conn()
+    try:
+        conn.execute("""
+            UPDATE episodes
+            SET status = 'done_deleted', progress = 100, txt_path = ?, updated_at = ?
+            WHERE id = ?
+        """, (txt_path, datetime.now().isoformat(), episode_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_task_failed(episode_id: int, error_msg: str = None):
+    """处理失败：downloading/transcribing → failed，progress=0"""
+    conn = get_conn()
+    try:
+        if error_msg:
+            conn.execute("""
+                UPDATE episodes
+                SET status = 'failed', progress = 0,
+                    error_msg = COALESCE(error_msg, ''),
+                    updated_at = ?
+                WHERE id = ? AND error_msg IS NULL
+            """, (datetime.now().isoformat(), episode_id))
+        else:
+            conn.execute("""
+                UPDATE episodes
+                SET status = 'failed', progress = 0, updated_at = ?
+                WHERE id = ?
+            """, (datetime.now().isoformat(), episode_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_queue_status() -> dict:
+    """返回各状态的数量统计，供前端展示用"""
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            SELECT status, COUNT(*) as cnt
+            FROM episodes
+            WHERE status IN ('downloading', 'transcribing', 'queued', 'done_deleted', 'failed')
+            GROUP BY status
+        """)
+        return {row[0]: row[1] for row in cur.fetchall()}
     finally:
         conn.close()
 
