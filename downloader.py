@@ -65,6 +65,7 @@ class Downloader:
         episode_name: str,
         eid: str,
         progress_callback=None,
+        check_terminated=None,
     ) -> dict:
         """
         下载音频文件。
@@ -74,6 +75,7 @@ class Downloader:
             episode_name: 用于文件名的集名
             eid: 用于进度文件命名
             progress_callback: 回调函数，接收 (bytes_downloaded, total_bytes)
+            check_terminated: 可调用函数，返回 True 表示已终止，应停止下载
 
         Returns:
             {"ok": True, "file": "path/to/audio.m4a"}
@@ -119,10 +121,17 @@ class Downloader:
             # 读取 yt-dlp 输出（-v info 模式）
             # yt-dlp 在下载中会输出类似：[download]  10.5% of   45.32MiB at   1.23MiB/s ETA 00:35
             while True:
+                # 使用非阻塞方式检查终止标志（每0.5秒检查一次）
+                if check_terminated and check_terminated():
+                    proc.kill()
+                    proc.wait()
+                    return {"ok": False, "error": "已终止"}
+                # 使用 poll() + sleep 实现非阻塞读取
                 line = proc.stdout.readline()
                 if not line:
                     if proc.poll() is not None:
                         break
+                    time.sleep(0.5)
                     continue
                 line = line.strip()
 
@@ -144,12 +153,21 @@ class Downloader:
                         except (ValueError, IndexError):
                             pass
 
-            proc.wait()
+            # 使用非阻塞 wait + 终止检查
+            while True:
+                if check_terminated and check_terminated():
+                    proc.kill()
+                    proc.wait()
+                    return {"ok": False, "error": "已终止"}
+                return_code = proc.poll()
+                if return_code is not None:
+                    break
+                time.sleep(0.5)
 
-            if proc.returncode != 0:
+            if return_code != 0:
                 stderr_text = proc.stderr.read() if proc.stderr else ""
                 push_status(f"[错误] 下载失败: {stderr_text[:200]}")
-                return {"ok": False, "error": f"yt-dlp 返回码 {proc.returncode}"}
+                return {"ok": False, "error": f"yt-dlp 返回码 {return_code}"}
 
             if not audio_path.exists() or audio_path.stat().st_size < 1024:
                 return {"ok": False, "error": "文件未正确下载（文件不存在或太小）"}

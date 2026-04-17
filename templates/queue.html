@@ -47,6 +47,7 @@
     .remove-btn:hover { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
     .stop-btn { font-size: 12px; padding: 3px 10px; border-radius: 12px; border: 1px solid var(--red); background: var(--card); color: var(--red); cursor: pointer; flex-shrink: 0; text-decoration: none; display: inline-block; }
     .stop-btn:hover { background: #fee2e2; }
+    .stop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .section-title { font-size: 13px; color: var(--text-secondary); margin: 20px 0 10px; }
     .empty { text-align: center; padding: 40px; color: var(--text-secondary); }
@@ -91,8 +92,8 @@ function renderTaskCard(task, showStop) {
   const statusClass = isDownloading ? 'status-downloading' : 'status-transcribing';
   const progress = task.progress || 0;
   const elapsed = formatElapsed(task.elapsed || 0);
-  const stopLink = showStop
-    ? `<a href="/api/queue/stop?episode_id=${task.episode_id}" class="stop-btn" onclick="return confirm('确定要终止当前任务吗？')">终止任务</a>`
+  const stopBtn = showStop
+    ? `<button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()">终止任务</button>`
     : '';
   return `
     <div class="card">
@@ -103,7 +104,7 @@ function renderTaskCard(task, showStop) {
         <span class="status ${statusClass}">${statusLabel}</span>
         <span>${progress}%</span>
         <span>已耗时 ${elapsed}</span>
-        ${stopLink}
+        ${stopBtn}
       </div>
     </div>`;
 }
@@ -221,6 +222,115 @@ evtSource.addEventListener('task_done', (e) => {
 loadQueue();
 // 每秒轮询刷新（补充 SSE 可能漏掉的任务状态）
 setInterval(loadQueue, 1000);
+
+// ---- 终止按钮逻辑 ----
+let _stopBtnDisabled = false;
+
+async function stopCurrentTask() {
+  if (_stopBtnDisabled) return;
+  const btn = document.getElementById('stop-btn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '终止中...';
+  _stopBtnDisabled = true;
+  try {
+    await fetch('/api/queue/stop');
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '终止任务';
+    _stopBtnDisabled = false;
+  }
+}
+
+// task_stop 事件：显示确认弹框
+evtSource.addEventListener('task_stop', (e) => {
+  const data = JSON.parse(e.data);
+  _stopBtnDisabled = false;
+  showStopDialog(data);
+});
+
+function showStopDialog(data) {
+  // 移除已有弹框
+  const existing = document.getElementById('stop-dialog-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'stop-dialog-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+
+  if (!data.audio_complete) {
+    // 音频不完整：直接显示提示，用户确认后任务自动变为 pending
+    overlay.innerHTML = `
+      <div style="background:white;border-radius:12px;padding:24px 32px;max-width:360px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,0.15);position:relative;">
+        <button onclick="closeStopDialog()" style="position:absolute;top:12px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#64748b;">✕</button>
+        <div style="font-size:18px;margin-bottom:16px;">🗑️ 已终止</div>
+        <div style="font-size:14px;color:#64748b;margin-bottom:20px;">音频不完整，已删除。任务已重置为未转化。</div>
+        <button onclick="closeStopDialog()" style="padding:8px 24px;border-radius:8px;border:none;background:#3b82f6;color:white;cursor:pointer;font-size:14px;">知道了</button>
+      </div>`;
+  } else {
+    // 音频完整：3选项 + 右上角X（关闭=继续）
+    overlay.innerHTML = `
+      <div style="background:white;border-radius:12px;padding:24px 32px;max-width:380px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,0.15);position:relative;">
+        <button onclick="continueTask()" style="position:absolute;top:12px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#64748b;">✕</button>
+        <div style="font-size:18px;margin-bottom:16px;">⏸️ 已终止</div>
+        <div style="font-size:14px;color:#64748b;margin-bottom:20px;">音频已保留，如何处理此任务？</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <button onclick="continueTask()" style="padding:10px 20px;border-radius:8px;border:1px solid #e2e8f0;background:white;color:#1f2328;cursor:pointer;font-size:14px;font-weight:500;">继续</button>
+          <button onclick="pauseTask('${data.eid}')" style="padding:10px 20px;border-radius:8px;border:none;background:#7c3aed;color:white;cursor:pointer;font-size:14px;font-weight:500;">暂停（保留音频）</button>
+          <button onclick="resetTask('${data.eid}')" style="padding:10px 20px;border-radius:8px;border:none;background:#dc2626;color:white;cursor:pointer;font-size:14px;font-weight:500;">重置（删除音频）</button>
+        </div>
+      </div>`;
+  }
+  document.body.appendChild(overlay);
+}
+
+function closeStopDialog() {
+  const overlay = document.getElementById('stop-dialog-overlay');
+  if (overlay) overlay.remove();
+  const btn = document.getElementById('stop-btn');
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = '终止任务';
+  }
+}
+
+// 继续：关闭弹框，任务继续运行
+async function continueTask() {
+  closeStopDialog();
+  // 不做任何 API 调用，任务继续
+}
+
+// 暂停：杀死子进程，audio_path 保留音频，状态改为 paused
+async function pauseTask(eid) {
+  closeStopDialog();
+  const episodeId = getEpisodeIdByEid(eid);
+  if (!episodeId) return;
+  try {
+    await fetch(`/api/episode/pause/${episodeId}`, { method: 'POST' });
+    loadQueue();
+  } catch (e) {
+    console.error('暂停失败:', e);
+  }
+}
+
+// 重置：杀死子进程，删除音频，状态改为 pending
+async function resetTask(eid) {
+  closeStopDialog();
+  const episodeId = getEpisodeIdByEid(eid);
+  if (!episodeId) return;
+  try {
+    await fetch(`/api/episode/reset/${episodeId}`, { method: 'POST' });
+    loadQueue();
+  } catch (e) {
+    console.error('重置失败:', e);
+  }
+}
+
+function getEpisodeIdByEid(eid) {
+  if (!window._cachedTasks) return null;
+  const task = window._cachedTasks.find(t => t.eid === eid);
+  return task ? (task.episode_id || task.id) : null;
+}
 </script>
 </body>
 </html>

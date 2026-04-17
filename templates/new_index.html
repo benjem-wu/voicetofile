@@ -159,9 +159,9 @@
   }
   .podcast-name-text a:hover { color: var(--primary); }
 
-  /* 红点（新内容标记） */
+/* 红点（新内容标记） */
   .new-badge {
-    display: inline-block;
+    display: none;
     width: 8px; height: 8px;
     background: #ef4444;
     border-radius: 50%;
@@ -192,12 +192,17 @@
   }
 
   /* 数字列（可点击） */
-  .num-cell { text-align: center; white-space: nowrap; }
+  .num-cell { text-align: center; white-space: nowrap; cursor: pointer; }
   .num-cell a {
     color: var(--primary); font-weight: 600; font-size: 15px;
     text-decoration: none; cursor: pointer;
   }
   .num-cell a:hover { text-decoration: underline; }
+  .num-cell .num-value {
+    color: var(--primary); font-weight: 600; font-size: 15px;
+    transition: color 0.15s;
+  }
+  .num-cell:hover .num-value { color: var(--primary-dark); text-decoration: underline; }
   .num-cell span { color: var(--text-secondary); font-size: 12px; margin-left: 2px; }
 
   /* 日期列 */
@@ -315,6 +320,15 @@
     cursor: pointer;
   }
   .failed-link:hover { text-decoration: underline; }
+  .paused-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #ede9fe;
+    color: #5b21b6;
+  }
   .done-link {
     color: #166534;
     text-decoration: none;
@@ -568,16 +582,16 @@
             <div class="podcast-name-cell">
               <span class="expand-icon" id="expand-icon-{{ p.id }}">▶</span>
               <span class="new-badge" id="badge-{{ p.id }}"></span>
-              <span class="podcast-name-text"><a onclick="event.stopPropagation(); window.open('/podcast/{{ p.id }}', '_blank')">{{ p.name }}</a></span>
+              <span class="podcast-name-text">{{ p.name }}</span>
             </div>
           </td>
-          <td class="col-num num-cell">{{ p.total_episodes }}<span>集</span></td>
-          <td class="col-num num-cell">{{ p.done_episodes }}<span>集</span></td>
+          <td class="col-num num-cell" onclick="event.stopPropagation(); window.open('/podcast/{{ p.id }}', '_blank')"><span class="num-value">{{ p.total_episodes }}</span><span>集</span></td>
+          <td class="col-num num-cell" onclick="event.stopPropagation(); openPodcastFolder({{ p.id }})"><span class="num-value">{{ p.done_episodes }}</span><span>集</span></td>
           <td class="date-cell" data-date="{{ p.latest_pub_date if p.latest_pub_date else '' }}">{{ p.latest_pub_date[5:10] if p.latest_pub_date else '—' }}</td>
           <td class="col-actions" onclick="event.stopPropagation();">
             <div class="action-btns">
               <button class="btn btn-secondary btn-sm" onclick="window.open('/podcast/{{ p.id }}', '_blank')">查看</button>
-              <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); refreshPodcast({{ p.id }})">刷新</button>
+<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); refreshPodcast({{ p.id }})" {% if p.pid == '__manual__' %}disabled style="opacity:0.4;cursor:not-allowed"{% endif %}>刷新</button>
               <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); deletePodcast({{ p.id }})">删除</button>
             </div>
           </td>
@@ -874,6 +888,16 @@
 <div id="toast"></div>
 
 <script>
+// ============ 单页保护 ============
+const PAGE_KEY = 'vtf_page_active';
+if (localStorage.getItem(PAGE_KEY) === 'true') {
+  window.close();
+  document.body.innerHTML = '<div style="text-align:center;padding:80px;font-size:16px;color:#666;">已有一个页面在运行，此页面已关闭。</div>';
+} else {
+  localStorage.setItem(PAGE_KEY, 'true');
+  window.addEventListener('beforeunload', () => localStorage.removeItem(PAGE_KEY));
+}
+
 // ============ 全局状态 ============
 let currentExpanded = null;
 let episodeCache = {};  // podcastId -> episodes array
@@ -923,6 +947,7 @@ async function toggleExpand(row) {
     expandedRow.style.display = 'none';
     icon.classList.remove('expanded');
     currentExpanded = null;
+    markPodcastViewed(podcastId);
   } else {
     // 先收起上一个
     if (currentExpanded) {
@@ -974,9 +999,6 @@ async function toggleExpand(row) {
     } else {
       if (mainSpin) mainSpin.remove();
     }
-
-    // 标记为已查看（展开即视为查看）
-    markPodcastViewed(podcastId);
   }
 }
 
@@ -1006,6 +1028,7 @@ function renderSubTable(podcastId, episodes) {
     const isDone = ep.status === 'done_deleted';
     const isPaid = ep.is_paid;
     const isFailed = ep.status === 'failed';
+    const isPaused = ep.status === 'paused';
     const isProcessing = ep.status === 'downloading' || ep.status === 'transcribing';
     const isQueued = ep.status === 'queued';
     const isPending = ep.status === 'pending';
@@ -1015,8 +1038,10 @@ function renderSubTable(podcastId, episodes) {
       statusHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt(${ep.id})">已转化</a>`;
     } else if (isPaid) {
       statusHtml = '<span class="paid-tag">不可转</span>';
+    } else if (isPaused) {
+      statusHtml = `<a href="#" class="undone-link" style="color:#7c3aed;" onclick="event.preventDefault(); resumeEpisode(${ep.id})">待续转</a>`;
     } else if (isFailed) {
-      statusHtml = '<span class="failed-link">失败</span>';
+      statusHtml = `<a href="#" class="failed-link" onclick="event.preventDefault(); showFailedDialog(${ep.id})">失败</a>`;
     } else if (isProcessing) {
       statusHtml = '<span class="transcribing-tag"><span class="spin-icon"></span>处理中</span>';
     } else if (isQueued) {
@@ -1112,8 +1137,8 @@ function renderDetailPage() {
   document.getElementById('detail-title').textContent = `📻 ${escapeHtml(detailPodcastName)}`;
   document.getElementById('detail-count').textContent = `共 ${total} 集`;
 
-  // 更新统计（未转文字 = 排队中+下载中+转写中+失败）
-  const processingCount = episodes.filter(e => ['pending', 'queued', 'downloading', 'transcribing', 'failed'].includes(e.status)).length;
+  // 更新统计（未转文字 = 排队中+下载中+转写中+暂停+失败）
+  const processingCount = episodes.filter(e => ['pending', 'queued', 'downloading', 'transcribing', 'paused', 'failed'].includes(e.status)).length;
   document.getElementById('detail-stats').innerHTML = `
     <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
       <div style="font-size:24px; font-weight:700; color:var(--green);">${doneCount}</div>
@@ -1135,6 +1160,7 @@ function renderDetailPage() {
     const isDone = ep.status === 'done_deleted';
     const isPaid = ep.is_paid;
     const isFailed = ep.status === 'failed';
+    const isPaused = ep.status === 'paused';
     const isProcessing = ep.status === 'downloading' || ep.status === 'transcribing';
     const isQueued = ep.status === 'queued';
     let statusHtml;
@@ -1143,8 +1169,10 @@ function renderDetailPage() {
       statusHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt(${ep.id})">已转化</a>`;
     } else if (isPaid) {
       statusHtml = '<span class="paid-tag">不可转</span>';
+    } else if (isPaused) {
+      statusHtml = `<a href="#" class="undone-link" style="color:#7c3aed;" onclick="event.preventDefault(); resumeEpisode(${ep.id})">待续转</a>`;
     } else if (isFailed) {
-      statusHtml = '<span class="failed-link">失败</span>';
+      statusHtml = `<a href="#" class="failed-link" onclick="event.preventDefault(); showFailedDialog(${ep.id})">失败</a>`;
     } else if (isProcessing) {
       statusHtml = '<span class="transcribing-tag"><span class="spin-icon"></span>处理中</span>';
     } else if (isQueued) {
@@ -1249,6 +1277,18 @@ async function openTxt(episodeId) {
   }
 }
 
+async function openPodcastFolder(podcastId) {
+  try {
+    const resp = await fetch(`/api/podcast/open/${podcastId}`);
+    const data = await resp.json();
+    if (!data.ok) {
+      toast(data.error || '打开失败', 'error');
+    }
+  } catch (e) {
+    toast('打开失败', 'error');
+  }
+}
+
 // ============ 队列视图 ============
 async function loadQueue() {
   try {
@@ -1259,9 +1299,7 @@ async function loadQueue() {
       window._tickerTasks = data.tasks;
       updateTicker(window._tickerTasks);
     }
-    renderQueue(data.tasks || []);
-    // 不在这里调 refreshSubTable —— SSE 事件会更新 episodeCache，
-    // task_done 时会调 refreshSubTable 获取最终状态
+    // 注意：renderQueue 是 queue.html 的渲染函数，主页不需要调用
   } catch (e) {
     console.error('加载队列失败:', e);
   }
@@ -1473,42 +1511,52 @@ async function refreshAll() {
   let updatedPodcasts = [];
 
   try {
-    const rows = document.querySelectorAll('.row-main');
+    const rows = document.querySelectorAll('.row-main[data-podcast]');
+    const manualPodcastId = {{ manual_podcast_id }};
+    const promises = [];
     for (const row of rows) {
       const pid = parseInt(row.dataset.podcast);
-      try {
-        const resp = await fetch('/api/episodes/refresh', {
+      if (pid === manualPodcastId) continue;
+      promises.push(
+        fetch('/api/episodes/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ podcast_id: pid })
-        });
-        const data = await resp.json();
-        if (data.ok && data.new_count > 0) {
-          totalNew += data.new_count;
-          updatedPodcasts.push({ name: data.podcast_name, newCount: data.new_count, pid });
-        }
-      } catch (e) {}
+        }).then(r => r.json()).then(data => ({ pid, data }))
+        .catch(e => ({ pid, data: { ok: false } }))
+      );
     }
 
-    // 汇总弹窗
+    const results = await Promise.all(promises);
+
+    for (const { pid, data } of results) {
+      if (data.ok && data.new_count > 0) {
+        totalNew += data.new_count;
+        updatedPodcasts.push({ name: data.podcast_name, newCount: data.new_count, pid });
+      }
+    }
+
+    // 从 DB 获取当前有 is_new 标记的播客列表，更新红点显示
+    const newIdsResp = await fetch('/api/podcasts/new-ids');
+    const newIdsData = await newIdsResp.json();
+    const newIds = new Set(newIdsData.new_podcast_ids || []);
+
+    // 刷新所有行的 badge 显示状态
+    document.querySelectorAll('.row-main[data-podcast]').forEach(row => {
+      const pid = parseInt(row.dataset.podcast);
+      if (newIds.has(pid)) {
+        showBadge(pid);
+      } else {
+        hideBadge(pid);
+      }
+    });
+
     if (totalNew > 0) {
-      const lines = updatedPodcasts.map(p => `• ${p.name} 新增 ${p.new_count} 集`).join('\n');
+      const lines = updatedPodcasts.map(p => `• ${p.name} 新增 ${p.newCount} 集`).join('\n');
       toast(`🎉 ${updatedPodcasts.length} 个播客更新，共 ${totalNew} 条新集\n${lines}`, 'success');
-      // 更新红点：给有新集的播客加上红点
-      updatedPodcasts.forEach(p => {
-        const row = document.querySelector(`.row-main[data-podcast="${p.pid}"]`);
-        if (row && !row.querySelector('.new-badge')) {
-          const badge = document.createElement('span');
-          badge.className = 'new-badge';
-          badge.id = `badge-${p.pid}`;
-          const nameCell = row.querySelector('.podcast-name-cell');
-          nameCell.insertBefore(badge, nameCell.firstChild);
-        }
-      });
     } else {
       toast('刷新完成，暂无更新', 'info');
     }
-    location.reload();
   } catch (e) {
     toast('刷新失败', 'error');
   } finally {
@@ -1652,6 +1700,88 @@ async function enqueueEpisode(episodeId, podcastId) {
   }
 }
 
+// ============ 继续暂停的任务 ============
+async function resumeEpisode(episodeId) {
+  try {
+    const resp = await fetch(`/api/episode/resume/${episodeId}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('已继续处理', 'success');
+      loadQueue();
+      // 刷新展开的子表
+      if (currentExpanded) {
+        const mainRow = currentExpanded.previousElementSibling;
+        if (mainRow && mainRow.classList.contains('row-main')) {
+          await refreshSubTable(parseInt(mainRow.dataset.podcast));
+        }
+      }
+    } else {
+      toast('继续失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    toast('继续失败', 'error');
+  }
+}
+
+// ============ 失败任务弹框 ============
+let _failedDialogEpisodeId = null;
+
+async function showFailedDialog(episodeId) {
+  _failedDialogEpisodeId = episodeId;
+  // 先获取错误信息
+  let errorMsg = '任务处理失败';
+  try {
+    const resp = await fetch(`/api/episode/${episodeId}`);
+    const data = await resp.json();
+    if (data.episode && data.episode.error_msg) {
+      errorMsg = data.episode.error_msg;
+    }
+  } catch (e) {}
+
+  const overlay = document.getElementById('error-dialog-overlay');
+  document.getElementById('error-msg-text').textContent = errorMsg;
+  // 清空 footer，添加自定义按钮
+  const footer = document.querySelector('#error-dialog-overlay .dialog-footer');
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="closeErrorDialog()">取消</button>
+    <button class="btn btn-primary" onclick="retryFailedEpisode()">重新开始</button>
+  `;
+  overlay.style.display = 'flex';
+}
+
+async function retryFailedEpisode() {
+  if (!_failedDialogEpisodeId) return;
+  const episodeId = _failedDialogEpisodeId;
+  closeErrorDialog();
+  try {
+    const resp = await fetch(`/api/episode/retry/${episodeId}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('已重新加入队列', 'success');
+      loadQueue();
+      if (currentExpanded) {
+        const mainRow = currentExpanded.previousElementSibling;
+        if (mainRow && mainRow.classList.contains('row-main')) {
+          await refreshSubTable(parseInt(mainRow.dataset.podcast));
+        }
+      }
+    } else {
+      toast('重新开始失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    toast('重新开始失败', 'error');
+  }
+  _failedDialogEpisodeId = null;
+}
+
+function closeErrorDialog() {
+  document.getElementById('error-dialog-overlay').style.display = 'none';
+  // 恢复 footer
+  const footer = document.querySelector('#error-dialog-overlay .dialog-footer');
+  footer.innerHTML = `<button class="btn btn-primary" onclick="closeErrorDialog()">关闭</button>`;
+  _failedDialogEpisodeId = null;
+}
+
 async function refreshPodcast(podcastId) {
   const btn = document.querySelector(`button[onclick*="refreshPodcast(${podcastId})"]`);
   if (btn) { btn.disabled = true; }
@@ -1664,7 +1794,15 @@ async function refreshPodcast(podcastId) {
     const data = await resp.json();
     if (data.ok) {
       toast(`已刷新 "${data.podcast_name}"`, 'success');
-      // 刷新完成后重新拉取 episodes，更新缓存和 UI 数字
+      // 根据 DB 中的 is_new 标记更新红点
+      const newIdsResp = await fetch('/api/podcasts/new-ids');
+      const newIdsData = await newIdsResp.json();
+      const newIds = new Set(newIdsData.new_podcast_ids || []);
+      if (newIds.has(podcastId)) {
+        showBadge(podcastId);
+      } else {
+        hideBadge(podcastId);
+      }
       await refreshSubTable(podcastId);
     } else {
       toast('刷新失败', 'error');
@@ -1692,30 +1830,29 @@ function closeDialogs() {
 }
 
 // ============ 红点持久化 ============
-const VIEWED_KEY = 'vtf_viewed_podcasts';
-
-function markPodcastViewed(podcastId) {
-  // 写入 localStorage
-  const viewed = new Set(JSON.parse(localStorage.getItem(VIEWED_KEY) || '[]'));
-  viewed.add(podcastId);
-  localStorage.setItem(VIEWED_KEY, JSON.stringify([...viewed]));
-  // 从 DOM 移除红点
-  const row = document.querySelector(`.row-main[data-podcast="${podcastId}"]`);
-  if (row) {
-    const badge = row.querySelector('.new-badge');
-    if (badge) badge.remove();
-  }
+// 显示红点
+function showBadge(podcastId) {
+  const badge = document.getElementById(`badge-${podcastId}`);
+  if (badge) badge.style.display = 'inline-block';
 }
 
-function clearViewedBadge(podcastId) {
-  const viewed = new Set(JSON.parse(localStorage.getItem(VIEWED_KEY) || '[]'));
-  if (viewed.has(podcastId)) {
-    const row = document.querySelector(`.row-main[data-podcast="${podcastId}"]`);
-    if (row) {
-      const badge = row.querySelector('.new-badge');
-      if (badge) badge.remove();
-    }
-  }
+// 隐藏红点
+function hideBadge(podcastId) {
+  const badge = document.getElementById(`badge-${podcastId}`);
+  if (badge) badge.style.display = 'none';
+}
+
+// 标记播客已读（收起时调用），清除 DB 中的 is_new 标记
+async function markPodcastViewed(podcastId) {
+  try {
+    await fetch(`/api/podcast/viewed/${podcastId}`, { method: 'POST' });
+  } catch (e) {}
+  hideBadge(podcastId);
+}
+
+// 页面加载时恢复小红点（基于 new_podcast_ids 模板变量）
+function restoreBadges(newPodcastIds) {
+  (newPodcastIds || []).forEach(pid => showBadge(pid));
 }
 
 // ============ 初始化 ============
@@ -1816,9 +1953,8 @@ homeEvtSource.addEventListener('task_new', (e) => {
 // 初始加载队列
 loadQueue();
 
-// 页面加载时，清除已查看播客的红点
-const viewed = JSON.parse(localStorage.getItem(VIEWED_KEY) || '[]');
-viewed.forEach(pid => clearViewedBadge(pid));
+// 页面加载时恢复小红点（基于 DB is_new 标记）
+restoreBadges({{ new_podcast_ids | tojson }});
 </script>
 </body>
 </html>

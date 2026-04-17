@@ -63,6 +63,16 @@ def init_db():
             cur.execute("ALTER TABLE episodes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # 列已存在
+        # 兼容已有数据库：is_new 列可能不存在（新集标记，展开后清除）
+        try:
+            cur.execute("ALTER TABLE episodes ADD COLUMN is_new INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+        # 兼容已有数据库：audio_path 列可能不存在（暂停时存储音频路径）
+        try:
+            cur.execute("ALTER TABLE episodes ADD COLUMN audio_path TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
 
         # 索引加速查询
         cur.execute("""
@@ -260,7 +270,31 @@ def get_episode_by_id(episode_id: int) -> Optional[dict]:
 
 def reset_episode_for_retry(episode_id: int):
     """重置 episode 状态为 pending，用于重新处理"""
-    update_episode_status(episode_id, "pending", txt_path="", error_msg="")
+    conn = get_conn()
+    try:
+        conn.execute("""
+            UPDATE episodes
+            SET status = 'pending', txt_path = '', error_msg = '',
+                audio_path = '', updated_at = ?
+            WHERE id = ?
+        """, (datetime.now().isoformat(), episode_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pause_episode(episode_id: int, audio_path: str = ""):
+    """暂停 episode：状态改为 paused，存储音频路径"""
+    conn = get_conn()
+    try:
+        conn.execute("""
+            UPDATE episodes
+            SET status = 'paused', audio_path = ?, updated_at = ?
+            WHERE id = ?
+        """, (audio_path, datetime.now().isoformat(), episode_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def sync_episode_txt_status(episode_id: int) -> bool:
@@ -351,8 +385,50 @@ def cleanup_placeholder_episodes() -> int:
         conn.close()
 
 
-def get_pending_episodes() -> list[dict]:
-    """获取所有 pending  episodes（用于队列展示）"""
+def mark_podcast_viewed(podcast_id: int):
+    """用户展开某播客后，清除该播客所有集的新集标记（is_new=0）"""
+    conn = get_conn()
+    try:
+        conn.execute("""
+            UPDATE episodes
+            SET is_new = 0, updated_at = ?
+            WHERE podcast_id = ? AND is_new = 1
+        """, (datetime.now().isoformat(), podcast_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_episodes_new(podcast_id: int, eids: list[str]):
+    """标记指定 eid 列表为新集（is_new=1）"""
+    if not eids:
+        return
+    conn = get_conn()
+    try:
+        placeholders = ','.join('?' * len(eids))
+        conn.execute(f"""
+            UPDATE episodes
+            SET is_new = 1, updated_at = ?
+            WHERE podcast_id = ? AND eid IN ({placeholders})
+        """, (datetime.now().isoformat(), podcast_id, *eids))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_podcasts_with_new() -> list[int]:
+    """获取所有包含新集（is_new=1）的 podcast_id 列表"""
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            SELECT DISTINCT podcast_id FROM episodes WHERE is_new = 1
+        """)
+        return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_pending_episodes():
     conn = get_conn()
     try:
         cur = conn.cursor()
