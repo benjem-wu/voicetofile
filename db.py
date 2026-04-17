@@ -566,16 +566,17 @@ def update_task_progress(episode_id: int, progress: int):
 def cleanup_stale_tasks() -> int:
     """
     Flask 启动时调用。
-    删除 downloading/transcribing 状态的残留任务（进程崩溃/强制退出后遗留）。
-    这些任务的音频/显存可能已泄漏，直接删除不留后患。
-    返回删除的任务数量。
+    将 downloading/transcribing 状态的残留任务恢复为 pending（进程崩溃/强制退出后遗留）。
+    音频/显存可能已泄漏，但 DB 记录保留，供用户手动重新入队。
+    返回清理的任务数量。
     """
     conn = get_conn()
     try:
         cur = conn.execute("""
-            DELETE FROM episodes
+            UPDATE episodes
+            SET status = 'pending', progress = 0, updated_at = ?
             WHERE status IN ('downloading', 'transcribing')
-        """)
+        """, (datetime.now().isoformat(),))
         conn.commit()
         return cur.rowcount
     finally:

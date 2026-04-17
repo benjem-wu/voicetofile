@@ -36,6 +36,9 @@ _current_task_info = None
 # 当前音频文件路径（下载完成后记录，供终止时验证）
 _current_audio_file = None
 
+# 当前输出目录（供终止时清理 progress 文件）
+_current_output_dir = None
+
 
 # --------------- 路径辅助 ---------------
 
@@ -82,7 +85,7 @@ def _verify_audio_complete(audio_file: str) -> bool:
 
 def _process_task(task: dict):
     """处理单个 episode：下载 → 转写 → 清理。"""
-    global _proc_to_kill, _task_terminated, _current_task_info, _current_audio_file
+    global _proc_to_kill, _task_terminated, _current_task_info, _current_audio_file, _current_output_dir
 
     episode_id = task["id"]
     eid = task["eid"]
@@ -92,6 +95,7 @@ def _process_task(task: dict):
     start_time = time.time()
 
     _current_task_info = task
+    _current_output_dir = output_dir
     audio_file = None
 
     task_update(eid, status="downloading", progress=0, elapsed=0)
@@ -185,7 +189,8 @@ def _process_task(task: dict):
         })
 
     finally:
-        print(f"[finally] episode_id={episode_id} eid={eid} _task_terminated={_task_terminated} _proc_to_kill={_proc_to_kill}")
+        print(f"[finally] episode_id={episode_id} eid={eid} _task_terminated={_task_terminated}")
+        # 杀子进程（如果还在运行）
         if _proc_to_kill is not None:
             try:
                 _proc_to_kill.kill()
@@ -194,19 +199,12 @@ def _process_task(task: dict):
                 pass
             _proc_to_kill = None
 
-        if _task_terminated:
-            print(f"[finally] 正在重置任务 eid={eid}")
-            db.reset_episode_for_retry(episode_id)
-            _task_terminated = False
-            task_update(eid, status="pending", progress=0, elapsed=0)
-            broadcast_sse("task_done", {
-                "eid": eid, "name": episode_name,
-                "podcast_name": podcast_name, "status": "pending"
-            })
-            print(f"[finally] 任务已重置为pending eid={eid}")
-
+        # _task_terminated=True 时，DB 状态和广播由 terminate_current_task() 统一处理
+        # 这里只清状态
+        _task_terminated = False
         _current_task_info = None
         _current_audio_file = None
+        _current_output_dir = None
 
 
 def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name: str,
@@ -360,3 +358,46 @@ def set_task_terminated():
 
 def is_task_terminated():
     return _task_terminated
+
+
+def terminate_current_task():
+    """
+    在 worker 线程内部执行终止逻辑（杀进程 + 删文件 + 返回 episode_id）。
+    供 routes/queue.py 的 api_queue_stop 调用。
+    """
+    global _task_terminated, _proc_to_kill, _current_task_info, _current_audio_file, _current_output_dir
+
+    _task_terminated = True
+
+    episode_id = _current_task_info.get("id") if _current_task_info else None
+
+    # 杀子进程
+    if _proc_to_kill is not None:
+        try:
+            _proc_to_kill.kill()
+            _proc_to_kill.wait()
+        except Exception:
+            pass
+        _proc_to_kill = None
+
+    # 删音频文件
+    audio_path = _current_audio_file
+    if audio_path and Path(audio_path).exists():
+        try:
+            Path(audio_path).unlink()
+            print(f"[终止] 已删除音频: {audio_path}")
+        except Exception as e:
+            print(f"[终止] 删除音频失败: {e}")
+
+    # 删临时文件（从正确的 output_dir，用 glob 匹配未知子进程 PID）
+    out_dir = _current_output_dir
+    if out_dir:
+        for pattern in ["_download_progress_*.txt", "_transcribe_progress_*.txt"]:
+            for f in out_dir.glob(pattern):
+                try:
+                    f.unlink()
+                    print(f"[终止] 已删除: {f.name}")
+                except Exception:
+                    pass
+
+    return episode_id

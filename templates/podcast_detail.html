@@ -1,0 +1,1863 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoiceToFile — 播客转文字</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f0f2f5;
+    --card: #fff;
+    --border: #e1e4e8;
+    --primary: #2563eb;
+    --primary-dark: #1d4ed8;
+    --text: #1f2328;
+    --text-secondary: #656d76;
+    --green: #16a34a;
+    --red: #dc2626;
+    --orange: #d97706;
+    --gray-bg: #f7f8fa;
+    --hover-bg: #f1f5f9;
+  }
+
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+
+  /* ---- 顶栏 ---- */
+  .topbar {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .topbar h1 { font-size: 18px; font-weight: 700; }
+  .topbar h1 span { color: var(--primary); }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+  /* ---- 主容器 ---- */
+  .container {
+    max-width: calc(100vw - 60px);
+    width: 1200px;
+    margin: 0 auto;
+    padding: 24px 0;
+  }
+
+  /* ---- 按钮 ---- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    cursor: pointer; border: none; transition: all 0.15s; text-decoration: none;
+  }
+  .btn:focus { outline: none; box-shadow: 0 0 0 2px rgba(37,99,235,0.3); }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: var(--primary-dark); }
+  .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--gray-bg); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+  .btn-icon { padding: 7px 10px; }
+
+  /* ---- 走马灯 ---- */
+  .ticker-wrap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    width: 100%;
+  }
+  .ticker {
+    background: linear-gradient(90deg, #eff6ff 0%, #f0f9ff 100%);
+    border-bottom: 1px solid #dbeafe;
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .ticker:hover { background: linear-gradient(90deg, #dbeafe 0%, #e0f2fe 100%); }
+  .ticker-label {
+    background: var(--primary); color: #fff;
+    padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .ticker-items {
+    display: flex; gap: 20px; overflow: hidden;
+    white-space: nowrap;
+  }
+  .ticker-item { color: var(--text); }
+  .ticker-item .name { font-weight: 500; color: var(--primary); }
+  .ticker-item .status { color: var(--text-secondary); font-size: 12px; margin-left: 4px; }
+  .ticker-sep { color: var(--border); }
+  .ticker-empty { color: var(--text-secondary); font-size: 13px; }
+  .ticker-hint {
+    margin-left: auto; font-size: 11px; color: var(--text-secondary);
+    display: flex; align-items: center; gap: 4px; white-space: nowrap; flex-shrink: 0;
+  }
+
+  /* ---- 表格 ---- */
+  .table-wrap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    width: 100%;
+  }
+  .table-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .table-header h2 { font-size: 15px; font-weight: 600; white-space: nowrap; }
+  .table-count { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  thead th {
+    padding: 0 16px;
+    text-align: left; font-size: 12px; font-weight: 600;
+    color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;
+    background: var(--gray-bg);
+    border-bottom: 1px solid var(--border);
+    height: 40px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); height: 48px; }
+  tbody tr:last-child { border-bottom: none; }
+  td { padding: 0 16px; vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* 表格列 */
+  .col-check { width: 50px; overflow: visible; text-overflow: clip; white-space: nowrap; }
+  .col-name { width: auto; }
+  .col-num { width: 90px; text-align: center; }
+  .col-date { width: 140px; text-align: center; }
+  .col-actions { width: 160px; text-align: right; overflow: visible; }
+
+  /* 行悬浮效果 */
+  tbody tr.row-main { cursor: pointer; transition: background 0.1s; }
+  tbody tr.row-main:hover { background: var(--hover-bg); }
+  tbody tr.row-main:hover .expand-icon { color: var(--primary); }
+
+  /* 展开图标 */
+  .expand-icon {
+    display: inline-block; width: 16px; font-size: 12px;
+    color: var(--border); transition: transform 0.2s, color 0.2s;
+    vertical-align: middle; margin-right: 6px;
+  }
+  .expand-icon.expanded { transform: rotate(90deg); color: var(--primary); }
+
+  /* 播客名称列 */
+  .podcast-name-cell { display: flex; align-items: center; gap: 0; }
+  .podcast-name-text { font-weight: 500; white-space: nowrap; }
+  .podcast-name-text a {
+    color: var(--text); text-decoration: none; font-weight: 600;
+    cursor: pointer;
+  }
+  .podcast-name-text a:hover { color: var(--primary); }
+
+/* 红点（新内容标记） */
+  .new-badge {
+    display: none;
+    width: 8px; height: 8px;
+    background: #ef4444;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+    animation: badge-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  .spin-icon {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(29, 78, 216, 0.2);
+    border-top-color: #1d4ed8;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 4px;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  @keyframes badge-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(239,68,68,0.25); }
+    50% { box-shadow: 0 0 0 4px rgba(239,68,68,0.15); }
+  }
+
+  /* 数字列（可点击） */
+  .num-cell { text-align: center; white-space: nowrap; cursor: pointer; }
+  .num-cell a {
+    color: var(--primary); font-weight: 600; font-size: 15px;
+    text-decoration: none; cursor: pointer;
+  }
+  .num-cell a:hover { text-decoration: underline; }
+  .num-cell .num-value {
+    color: var(--primary); font-weight: 600; font-size: 15px;
+    transition: color 0.15s;
+  }
+  .num-cell:hover .num-value { color: var(--primary-dark); text-decoration: underline; }
+  .num-cell span { color: var(--text-secondary); font-size: 12px; margin-left: 2px; }
+
+  /* 日期列 */
+  .date-cell { text-align: center; white-space: nowrap; color: var(--text-secondary); font-size: 13px; }
+
+  /* 操作列 */
+  .action-btns { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; overflow: visible; }
+  td.col-actions { overflow: visible; }
+
+  /* ---- 展开的子表格 ---- */
+  tr.expanded-row td {
+    background: #fafbfc;
+    padding: 0;
+    overflow: visible;
+  }
+  .expanded-content {
+    padding: 0 16px 16px;
+    border-top: 1px dashed var(--border);
+  }
+  .sub-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+  }
+  .sub-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+  }
+  .sub-table td:first-child { text-align: left; }
+  .sub-table td:nth-child(2),
+  .sub-table td:nth-child(3),
+  .sub-table td:nth-child(4),
+  .sub-table td:nth-child(5) { text-align: center; }
+  .sub-table tr:last-child td { border-bottom: none; }
+  .sub-table tr:hover td { background: var(--hover-bg); }
+  .col-sub-title { width: auto; }
+  .col-sub-time { width: 170px; }
+  .col-sub-len { width: 80px; text-align: center; }
+  .col-sub-done { width: 90px; text-align: center; }
+  .col-sub-free { width: 70px; text-align: center; }
+
+  .done-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #dcfce7;
+    color: #166534;
+  }
+  .undone-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #fef3c7;
+    color: #92400e;
+  }
+  .pending-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #fef3c7;
+    color: #d97706;
+  }
+  .free-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #dcfce7;
+    color: #166534;
+  }
+  .paid-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #f3f4f6;
+    color: #9ca3af;
+    cursor: not-allowed;
+  }
+  .downloading-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #fef3c7;
+    color: #92400e;
+  }
+  .transcribing-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+  .failed-link {
+    color: #dc2626;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .failed-link:hover { text-decoration: underline; }
+  .paused-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #ede9fe;
+    color: #5b21b6;
+  }
+  .done-link {
+    color: #166534;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .done-link:hover { text-decoration: underline; }
+  .undone-link {
+    color: #d97706;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .undone-link:hover { text-decoration: underline; }
+
+  .load-more {
+    text-align: center;
+    padding: 10px;
+    font-size: 12px;
+    color: var(--primary);
+    cursor: pointer;
+    border-top: 1px dashed var(--border);
+    margin-top: 4px;
+  }
+  .load-more:hover { background: #f0f7ff; }
+
+  /* 全部刷新按钮 */
+  #btn-refresh-all {
+    background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+    color: #fff; border: none; border-radius: 8px;
+    font-weight: 600; font-size: 13px;
+    padding: 8px 16px; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(238, 90, 36, 0.35);
+    transition: all 0.2s;
+  }
+  #btn-refresh-all:hover {
+    background: linear-gradient(135deg, #ff5252, #dd3422);
+    box-shadow: 0 4px 12px rgba(238, 90, 36, 0.5);
+    transform: translateY(-1px);
+  }
+  #btn-refresh-all:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(238, 90, 36, 0.3);
+  }
+  #btn-refresh-all.loading {
+    background: linear-gradient(135deg, #a0a0a0, #888);
+    box-shadow: none;
+    cursor: not-allowed;
+    animation: pulse-gray 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse-gray {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  /* 删除按钮 */
+  #btn-delete-selected {
+    background: #fee2e2; color: #991b1b; border: 1px solid #fecaca;
+    opacity: 0.4; cursor: not-allowed;
+    padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; font-weight: 500;
+    transition: all 0.15s;
+  }
+  #btn-delete-selected.enabled {
+    opacity: 1; cursor: pointer;
+  }
+  #btn-delete-selected.enabled:hover { background: #fecaca; }
+
+  /* ---- 对话框 ---- */
+  .dialog-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.45); z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .dialog-overlay.show { display: flex; }
+  .dialog {
+    background: var(--card); border-radius: 14px; padding: 28px;
+    width: 480px; max-width: 95vw;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  }
+  .dialog h3 { font-size: 16px; margin-bottom: 18px; display: flex; align-items: center; gap: 8px; }
+  .dialog input[type="text"] {
+    width: 100%; padding: 10px 14px; border: 1px solid var(--border);
+    border-radius: 8px; font-size: 14px; font-family: inherit;
+    margin-bottom: 14px;
+  }
+  .dialog input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+  .dialog-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+  .dialog-hint { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+
+  /* ---- Toast ---- */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: #1f2328; color: #fff; padding: 10px 16px;
+    border-radius: 8px; font-size: 13px; z-index: 300;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { background: var(--red); }
+  #toast.success { background: var(--green); }
+
+  /* ---- 确认对话框 ---- */
+  #confirm-dialog .dialog { width: 380px; }
+  #confirm-dialog .dialog-footer { justify-content: center; gap: 12px; }
+  #confirm-msg { font-size: 14px; color: var(--text); text-align: center; margin-bottom: 20px; line-height: 1.6; }
+  .btn-confirm-yes {
+    background: #ef4444; color: #fff; border: none;
+    padding: 8px 24px; border-radius: 8px;
+    font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .btn-confirm-yes:hover { background: #dc2626; }
+  .btn-confirm-no {
+    background: var(--card); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 24px; border-radius: 8px;
+    font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .btn-confirm-no:hover { background: var(--gray-bg); }
+
+  /* ---- 队列列表页 ---- */
+  .hidden { display: none !important; }
+  #detail-view { display: none; }
+  .queue-current-card {
+    background: var(--card); border: 1px solid var(--primary);
+    border-radius: 12px; padding: 16px 20px;
+  }
+  .qc-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+  .qc-progress-bar {
+    height: 8px; background: var(--gray-bg); border-radius: 4px; overflow: hidden; margin-bottom: 8px;
+  }
+  .qc-progress-fill { height: 100%; background: var(--primary); border-radius: 4px; transition: width 0.3s; }
+  .qc-meta { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); }
+  .qc-status { color: var(--primary); font-weight: 500; }
+  .qc-pct { font-weight: 600; }
+  .queue-page-item {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .queue-page-item.status-pending { border-left: 4px solid var(--orange); }
+  .queue-page-item.status-downloading { border-left: 4px solid var(--primary); }
+  .queue-page-item.status-transcribing { border-left: 4px solid #7c3aed; }
+  .queue-page-item.status-done_deleted { border-left: 4px solid var(--green); }
+  .queue-page-item.status-failed { border-left: 4px solid var(--red); }
+
+  /* ---- 分页 ---- */
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--gray-bg);
+  }
+  .page-info { font-size: 13px; color: var(--text-secondary); }
+  .page-btns { display: flex; gap: 6px; align-items: center; }
+  .page-btns .btn { min-width: 36px; justify-content: center; }
+  .page-btns .btn.active {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+
+  /* 详情页表格 */
+  #detail-tbody tr { height: 44px; }
+  #detail-tbody tr:hover { background: var(--hover-bg); }
+  #detail-tbody td { font-size: 13px; }
+
+  /* 全部下载按钮 */
+  #btn-download-all {
+    background: linear-gradient(135deg, #16a34a, #15803d);
+    color: #fff; border: none; border-radius: 8px;
+    font-weight: 600; font-size: 13px;
+    padding: 8px 16px; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(22, 163, 74, 0.3);
+    transition: all 0.2s;
+  }
+  #btn-download-all:hover {
+    background: linear-gradient(135deg, #15803d, #166534);
+    box-shadow: 0 4px 12px rgba(22, 163, 74, 0.4);
+    transform: translateY(-1px);
+  }
+  .qinfo { flex: 1; }
+  .qinfo-name { font-weight: 600; font-size: 14px; }
+  .qinfo-sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .qstatus { font-size: 12px; padding: 3px 10px; border-radius: 12px; font-weight: 500; }
+  .qstatus.pending { background: #fef3c7; color: #92400e; }
+  .qstatus.downloading { background: #dbeafe; color: #1e40af; }
+  .qstatus.transcribing { background: #ede9fe; color: #5b21b6; }
+  .qstatus.done_deleted { background: #dcfce7; color: #166534; }
+  .qstatus.failed { background: #fee2e2; color: #991b1b; }
+  .qprogress { font-size: 13px; font-weight: 600; color: var(--text); min-width: 44px; text-align: center; }
+  .qtime { font-size: 12px; color: var(--text-secondary); min-width: 50px; text-align: right; }
+</style>
+</head>
+<body>
+
+<!-- 顶栏 -->
+<div class="topbar">
+  <h1><span>Voice</span>ToFile</h1>
+  <div class="topbar-right">
+    <button class="btn btn-secondary btn-sm" onclick="window.open('/queue', '_blank')">📋 队列</button>
+    <button class="btn btn-secondary btn-sm">⚙ 设置</button>
+  </div>
+</div>
+
+<!-- 主容器 -->
+<div class="container" id="main-view"></div>
+
+<div class="container" id="detail-view">
+  <div id="detail-header" style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
+    <button class="btn btn-secondary btn-icon" onclick="showMainView()">← 返回</button>
+    <h2 id="detail-title" style="font-size:18px; font-weight:600;">📻 播客名称</h2>
+    <span id="detail-count" class="table-count">共 0 集</span>
+    <button class="btn btn-secondary btn-sm" id="detail-refresh-btn" onclick="refreshDetail()">🔄 刷新列表</button>
+    <button class="btn btn-secondary btn-sm" onclick="showAddDialog()">➕ 手动添加</button>
+    <button id="btn-download-all" onclick="downloadAllUndone()">📥 全部下载</button>
+  </div>
+
+  <!-- 统计信息 -->
+  <div id="detail-stats" style="display:flex; gap:16px; margin-bottom:16px;">
+    <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
+      <div style="font-size:24px; font-weight:700; color:var(--primary);">35</div>
+      <div style="font-size:12px; color:var(--text-secondary);">已转文字</div>
+    </div>
+    <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
+      <div style="font-size:24px; font-weight:700; color:var(--orange);">10</div>
+      <div style="font-size:12px; color:var(--text-secondary);">未转文字</div>
+    </div>
+    <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
+      <div style="font-size:24px; font-weight:700; color:#9ca3af;">5</div>
+      <div style="font-size:12px; color:var(--text-secondary);">付费</div>
+    </div>
+  </div>
+
+  <!-- 详情表格 -->
+  <div class="table-wrap">
+    <div class="table-header">
+      <h2>📋 全部剧集</h2>
+      <div style="margin-left: auto; display:flex; gap:8px; align-items:center; flex-shrink:0;">
+        <button class="btn btn-secondary btn-sm">🔄 刷新列表</button>
+        <button class="btn btn-secondary btn-sm" onclick="showAddDialog()">➕ 手动添加</button>
+        <button id="btn-download-all" onclick="downloadAll()">📥 全部下载</button>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="col-name" style="width:auto;">标题</th>
+          <th class="col-num" style="width:160px;">发布时间</th>
+          <th class="col-num" style="width:90px;">音频长度</th>
+          <th class="col-num" style="width:100px;">是否已转文字</th>
+          <th class="col-num" style="width:70px;">是否免费</th>
+        </tr>
+      </thead>
+      <tbody id="detail-tbody">
+        <tr>
+          <td class="col-name">Vol.944 重新理解亲密关系</td>
+          <td>04月15日 14:30:25</td>
+          <td>102.5分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.943 我们为什么还在买 CD</td>
+          <td>04月10日 08:00:00</td>
+          <td>75.3分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.942 城市里的动物邻居</td>
+          <td>04月05日 08:00:00</td>
+          <td>68.8分钟</td>
+          <td><a href="#" class="undone-link">未转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.941 再说一句就打断你的腿</td>
+          <td>03月28日 08:00:00</td>
+          <td>82.2分钟</td>
+          <td><a href="#" class="undone-link">未转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.940 和AI谈恋爱是什么感觉</td>
+          <td>03月20日 08:00:00</td>
+          <td>95.9分钟</td>
+          <td><span class="paid-tag">不可转</span></td>
+          <td><span class="paid-tag">收费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.939 加班到凌晨的年轻人们</td>
+          <td>03月15日 08:00:00</td>
+          <td>88.5分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.938 房价跌了然后呢</td>
+          <td>03月10日 08:00:00</td>
+          <td>92.1分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.937 我们的下一代还要学英语吗</td>
+          <td>03月05日 08:00:00</td>
+          <td>78.6分钟</td>
+          <td><a href="#" class="undone-link">未转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.936 考公考研之外的出路</td>
+          <td>02月28日 08:00:00</td>
+          <td>85.3分钟</td>
+          <td><span class="paid-tag">不可转</span></td>
+          <td><span class="paid-tag">收费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.935 二手物品的循环经济学</td>
+          <td>02月20日 08:00:00</td>
+          <td>72.8分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.934 春节后遗症自救指南</td>
+          <td>02月15日 08:00:00</td>
+          <td>65.4分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.933 年轻人为什么不爱换手机了</td>
+          <td>02月10日 08:00:00</td>
+          <td>70.2分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.932 重新审视亲密关系</td>
+          <td>02月05日 08:00:00</td>
+          <td>88.9分钟</td>
+          <td><span class="paid-tag">不可转</span></td>
+          <td><span class="paid-tag">收费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.931 我们为什么还在买 CD</td>
+          <td>01月28日 08:00:00</td>
+          <td>76.5分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.930 城市里的动物邻居</td>
+          <td>01月20日 08:00:00</td>
+          <td>68.1分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.929 再说一句就打断你的腿</td>
+          <td>01月15日 08:00:00</td>
+          <td>81.7分钟</td>
+          <td><a href="#" class="undone-link">未转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.928 和AI谈恋爱是什么感觉</td>
+          <td>01月10日 08:00:00</td>
+          <td>94.3分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.927 加班到凌晨的年轻人们</td>
+          <td>01月05日 08:00:00</td>
+          <td>87.2分钟</td>
+          <td><span class="paid-tag">不可转</span></td>
+          <td><span class="paid-tag">收费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.926 房价跌了然后呢</td>
+          <td>12月28日 08:00:00</td>
+          <td>91.6分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+        <tr>
+          <td class="col-name">Vol.925 我们的下一代还要学英语吗</td>
+          <td>12月20日 08:00:00</td>
+          <td>79.8分钟</td>
+          <td><a href="#" class="done-link">已转文字</a></td>
+          <td><span class="free-tag">免费</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- 分页 -->
+    <div class="pagination">
+      <span class="page-info">显示 1-20 条，共 50 条</span>
+      <div class="page-btns">
+        <button class="btn btn-secondary btn-sm" disabled>上一页</button>
+        <button class="btn btn-secondary btn-sm active">1</button>
+        <button class="btn btn-secondary btn-sm">2</button>
+        <button class="btn btn-secondary btn-sm">3</button>
+        <button class="btn btn-secondary btn-sm" onclick="goPage(2)">下一页</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 订阅播客对话框 -->
+<div class="dialog-overlay" id="sub-dialog">
+  <div class="dialog">
+    <h3>📡 订阅播客 <button onclick="closeDialogs()" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:18px;line-height:1;">✕</button></h3>
+    <input type="text" id="sub-url" placeholder="粘贴播客链接，如 https://www.xiaoyuzhoufm.com/podcast/xxx">
+    <div class="dialog-hint">支持小宇宙播客链接或 PID</div>
+    <div class="dialog-footer">
+      <button class="btn btn-secondary" onclick="closeDialogs()">取消</button>
+      <button class="btn btn-primary">获取</button>
+    </div>
+  </div>
+</div>
+
+<!-- 手动添加对话框 -->
+<div class="dialog-overlay" id="add-dialog">
+  <div class="dialog">
+    <h3>➕ 手动添加单集 <button onclick="closeDialogs()" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:18px;line-height:1;">✕</button></h3>
+    <input type="text" id="add-url" placeholder="粘贴单集链接，如 https://www.xiaoyuzhoufm.com/episode/xxx">
+    <div class="dialog-hint">单独添加某一集到处理队列</div>
+    <div class="dialog-footer">
+      <button class="btn btn-secondary" onclick="closeDialogs()">取消</button>
+      <button class="btn btn-primary">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- 确认删除对话框 -->
+<div class="dialog-overlay" id="confirm-dialog">
+  <div class="dialog">
+    <h3>⚠️ 确认删除</h3>
+    <div id="confirm-msg">确认删除选中的播客？</div>
+    <div class="dialog-footer">
+      <button class="btn-confirm-no" onclick="closeDialogs()">取消</button>
+      <button class="btn-confirm-yes" onclick="confirmDelete()">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="error-dialog-overlay">
+  <div class="dialog">
+    <h3>❌ 错误信息</h3>
+    <div id="error-msg-text" style="margin: 16px 0; color: var(--text); font-size: 13px; white-space: pre-wrap;"></div>
+    <div class="dialog-footer">
+      <button class="btn btn-primary" onclick="closeErrorDialog()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+<script>
+// ============ 全局状态 ============
+let currentExpanded = null;
+let episodeCache = {};  // podcastId -> episodes array
+let podcastMeta = {};   // podcastId -> {total_episodes, done_episodes}
+let detailEpisodes = [];  // 当前详情页的剧集列表
+let detailPage = 1;
+let detailPodcastId = null;
+let detailPodcastName = '';
+const PAGE_SIZE = 20;
+
+// ============ 工具函数 ============
+function formatDate(dateStr) {
+  if (!dateStr) return '—';
+  // dateStr format: 2024-04-15T14:30:25 or 2024-04-15
+  const d = new Date(dateStr);
+  if (isNaN(d)) return dateStr.substring(5, 10);
+  return `${(d.getMonth()+1).toString().padStart(2,'0')}-${d.getDate().toString().padStart(2,'0')} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+}
+
+function toast(msg, type='info') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (type === 'error' ? ' error' : type === 'success' ? ' success' : '');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+function showErrorMsg(msg) {
+  const overlay = document.getElementById('error-dialog-overlay');
+  document.getElementById('error-msg-text').textContent = msg;
+  overlay.style.display = 'flex';
+}
+function closeErrorDialog() {
+  document.getElementById('error-dialog-overlay').style.display = 'none';
+}
+
+// ============ 展开/收起 ============
+async function toggleExpand(row) {
+  const podcastId = parseInt(row.dataset.podcast);
+  const expandedRow = row.nextElementSibling;
+  if (!expandedRow || !expandedRow.classList.contains('expanded-row')) return;
+
+  const icon = document.getElementById(`expand-icon-${podcastId}`);
+  const nameCell = row.querySelector('.podcast-name-cell');
+
+  if (currentExpanded === expandedRow) {
+    // 收起
+    expandedRow.style.display = 'none';
+    icon.classList.remove('expanded');
+    currentExpanded = null;
+    markPodcastViewed(podcastId);
+  } else {
+    // 先收起上一个
+    if (currentExpanded) {
+      currentExpanded.style.display = 'none';
+      const prevIcon = currentExpanded.previousElementSibling?.querySelector('.expand-icon');
+      if (prevIcon) prevIcon.classList.remove('expanded');
+    }
+
+    // 加载数据（如果还没有缓存）
+    if (!episodeCache[podcastId]) {
+      const tbody = document.getElementById(`subtbody-${podcastId}`);
+      try {
+        const resp = await fetch(`/api/podcast/${podcastId}/episodes`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.ok) {
+          episodeCache[podcastId] = data.episodes;
+          podcastMeta[podcastId] = {
+            total: data.episodes.length,
+            done: data.episodes.filter(e => e.status === 'done_deleted').length
+          };
+          renderSubTable(podcastId, data.episodes.slice(0, 5));
+        } else {
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--red);padding:20px;">加载失败: ${data.error || '未知错误'}</td></tr>`;
+        }
+      } catch (e) {
+        console.error('加载剧集失败:', e);
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--red);padding:20px;">加载失败: ${e.message}</td></tr>`;
+      }
+    } else {
+      renderSubTable(podcastId, episodeCache[podcastId].slice(0, 5));
+    }
+
+    // 展开当前
+    expandedRow.style.display = '';
+    icon.classList.add('expanded');
+    currentExpanded = expandedRow;
+
+    // 同步处理中图标
+    const firstRowHasSpin = expandedRow.querySelector('.sub-table tbody tr:first-child .spin-icon');
+    let mainSpin = nameCell.querySelector('.spin-icon');
+    if (firstRowHasSpin) {
+      if (!mainSpin) {
+        mainSpin = document.createElement('span');
+        mainSpin.className = 'spin-icon';
+        mainSpin.textContent = '◌';
+        nameCell.insertBefore(mainSpin, nameCell.firstChild);
+      }
+    } else {
+      if (mainSpin) mainSpin.remove();
+    }
+  }
+}
+
+function renderSubTable(podcastId, episodes) {
+  const tbody = document.getElementById(`subtbody-${podcastId}`);
+  if (!tbody) return;
+
+  // 先清空，防止重复渲染
+  tbody.innerHTML = '';
+
+  if (!episodes || episodes.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:20px;">暂无剧集</td></tr>';
+    return;
+  }
+
+  // 更新"查看全部"数字（使用 podcastMeta 中的真实总数）
+  const meta = podcastMeta[podcastId] || { total: episodes.length, done: 0 };
+  const loadmore = document.getElementById(`loadmore-${podcastId}`);
+  if (loadmore) {
+    loadmore.textContent = `▼ 查看全部 ${meta.total} 集（已转 ${meta.done} 集）`;
+  }
+  const btn = document.getElementById(`sub-refresh-${podcastId}`);
+  const hasProcessing = episodes.some(e => e.status === 'downloading' || e.status === 'transcribing');
+  if (btn) btn.disabled = hasProcessing;
+
+  tbody.innerHTML = episodes.map((ep, idx) => {
+    const isDone = ep.status === 'done_deleted';
+    const isPaid = ep.is_paid;
+    const isFailed = ep.status === 'failed';
+    const isPaused = ep.status === 'paused';
+    const isProcessing = ep.status === 'downloading' || ep.status === 'transcribing';
+    const isQueued = ep.status === 'queued';
+    const isPending = ep.status === 'pending';
+    let statusHtml;
+
+    if (isDone) {
+      statusHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt(${ep.id})">已转化</a>`;
+    } else if (isPaid) {
+      statusHtml = '<span class="paid-tag">不可转</span>';
+    } else if (isPaused) {
+      statusHtml = `<a href="#" class="undone-link" style="color:#7c3aed;" onclick="event.preventDefault(); resumeEpisode(${ep.id})">待续转</a>`;
+    } else if (isFailed) {
+      statusHtml = `<a href="#" class="failed-link" onclick="event.preventDefault(); showFailedDialog(${ep.id})">失败</a>`;
+    } else if (isProcessing) {
+      statusHtml = '<span class="transcribing-tag"><span class="spin-icon"></span>处理中</span>';
+    } else if (isQueued) {
+      statusHtml = '<span class="pending-tag">排队中</span>';
+    } else if (isPending) {
+      statusHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${podcastId})">未转化</a>`;
+    } else {
+      statusHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${podcastId})">未转化</a>`;
+    }
+
+    freeHtml = isPaid ? '<span class="paid-tag">收费</span>' : '<span class="free-tag">免费</span>';
+
+    const hasNew = idx === 0 && isDone;  // 最新且已转化标记
+    const xiaoyuzhouUrl = `https://www.xiaoyuzhoufm.com/episode/${ep.eid}`;
+    return `<tr data-ep-id="${ep.id}">
+      <td><a href="${xiaoyuzhouUrl}" target="_blank" style="color:var(--text);text-decoration:none;">${isProcessing ? '<span class="spin-icon"></span>' : ''}${hasNew ? '<span class="new-badge"></span>' : ''}${escapeHtml(ep.name)}</a></td>
+      <td>${formatDate(ep.pub_date)}</td>
+      <td>${ep.duration_str || '—'}</td>
+      <td>${statusHtml}</td>
+      <td>${freeHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+async function refreshSubTable(podcastId) {
+  const btn = document.getElementById(`sub-refresh-${podcastId}`);
+  if (btn && btn.disabled) return;
+
+  try {
+    const resp = await fetch(`/api/podcast/${podcastId}/episodes`);
+    const data = await resp.json();
+    if (data.ok) {
+      episodeCache[podcastId] = data.episodes;
+      podcastMeta[podcastId] = {
+        total: data.episodes.length,
+        done: data.episodes.filter(e => e.status === 'done_deleted').length
+      };
+      // 更新子表显示前5条
+      renderSubTable(podcastId, data.episodes.slice(0, 5));
+    }
+  } catch (e) {
+    console.error('刷新子表失败:', e);
+  }
+}
+
+// ============ 详情页 ============
+async function showDetail(podcastId) {
+  // 标记为已查看（持久化到 localStorage）并清除红点
+  markPodcastViewed(podcastId);
+
+  detailPodcastId = podcastId;
+  detailPage = 1;
+
+  // 显示详情页容器
+  document.getElementById('main-view').classList.add('hidden');
+  document.getElementById('detail-view').classList.remove('hidden');
+
+  // 如果没有缓存，先加载
+  if (!episodeCache[podcastId]) {
+    try {
+      const resp = await fetch(`/api/podcast/${podcastId}/episodes`);
+      const data = await resp.json();
+      if (data.ok) {
+        episodeCache[podcastId] = data.episodes;
+        detailPodcastName = data.podcast.name;
+        renderDetailPage();
+      }
+    } catch (e) {
+      console.error('加载详情失败:', e);
+      toast('加载详情失败', 'error');
+    }
+  } else {
+    detailPodcastName = episodeCache[podcastId]?.[0]?.name?.split(' ')[0] || '播客';
+    renderDetailPage();
+  }
+}
+
+function renderDetailPage() {
+  const episodes = episodeCache[detailPodcastId] || [];
+  const total = episodes.length;
+  const paidCount = episodes.filter(e => e.is_paid).length;
+  const doneCount = episodes.filter(e => e.status === 'done_deleted').length;
+  const start = (detailPage - 1) * PAGE_SIZE;
+  const pageEpisodes = episodes.slice(start, start + PAGE_SIZE);
+
+  // 更新头部信息
+  document.getElementById('detail-title').textContent = `📻 ${escapeHtml(detailPodcastName)}`;
+  document.getElementById('detail-count').textContent = `共 ${total} 集`;
+
+  // 更新统计（未转文字 = 排队中+下载中+转写中+暂停+失败）
+  const processingCount = episodes.filter(e => ['pending', 'queued', 'downloading', 'transcribing', 'paused', 'failed'].includes(e.status)).length;
+  document.getElementById('detail-stats').innerHTML = `
+    <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
+      <div style="font-size:24px; font-weight:700; color:var(--green);">${doneCount}</div>
+      <div style="font-size:12px; color:var(--text-secondary);">已转文字</div>
+    </div>
+    <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
+      <div style="font-size:24px; font-weight:700; color:var(--orange);">${processingCount}</div>
+      <div style="font-size:12px; color:var(--text-secondary);">未转文字</div>
+    </div>
+    <div style="background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 20px; text-align:center;">
+      <div style="font-size:24px; font-weight:700; color:#9ca3af;">${paidCount}</div>
+      <div style="font-size:12px; color:var(--text-secondary);">付费</div>
+    </div>
+  `;
+
+  // 更新表格（状态标签与子表一致）
+  const tbody = document.getElementById('detail-tbody');
+  tbody.innerHTML = pageEpisodes.map(ep => {
+    const isDone = ep.status === 'done_deleted';
+    const isPaid = ep.is_paid;
+    const isFailed = ep.status === 'failed';
+    const isPaused = ep.status === 'paused';
+    const isProcessing = ep.status === 'downloading' || ep.status === 'transcribing';
+    const isQueued = ep.status === 'queued';
+    let statusHtml;
+
+    if (isDone) {
+      statusHtml = `<a href="#" class="done-link" onclick="event.preventDefault(); openTxt(${ep.id})">已转化</a>`;
+    } else if (isPaid) {
+      statusHtml = '<span class="paid-tag">不可转</span>';
+    } else if (isPaused) {
+      statusHtml = `<a href="#" class="undone-link" style="color:#7c3aed;" onclick="event.preventDefault(); resumeEpisode(${ep.id})">待续转</a>`;
+    } else if (isFailed) {
+      statusHtml = `<a href="#" class="failed-link" onclick="event.preventDefault(); showFailedDialog(${ep.id})">失败</a>`;
+    } else if (isProcessing) {
+      statusHtml = '<span class="transcribing-tag"><span class="spin-icon"></span>处理中</span>';
+    } else if (isQueued) {
+      statusHtml = '<span class="pending-tag">排队中</span>';
+    } else {
+      statusHtml = `<a href="#" class="undone-link" onclick="event.preventDefault(); enqueueEpisode(${ep.id}, ${detailPodcastId})">未转化</a>`;
+    }
+
+    const freeHtml = isPaid ? '<span class="paid-tag">收费</span>' : '<span class="free-tag">免费</span>';
+    const xiaoyuzhouUrl = `https://www.xiaoyuzhoufm.com/episode/${ep.eid}`;
+
+    return `<tr data-ep-id="${ep.id}">
+      <td class="col-name"><a href="${xiaoyuzhouUrl}" target="_blank" style="color:var(--text);text-decoration:none;">${isProcessing ? '<span class="spin-icon"></span>' : ''}${escapeHtml(ep.name)}</a></td>
+      <td>${formatDate(ep.pub_date)}</td>
+      <td>${ep.duration_str || '—'}</td>
+      <td>${statusHtml}</td>
+      <td>${freeHtml}</td>
+    </tr>`;
+  }).join('');
+
+  // 更新分页
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const pagination = document.querySelector('#detail-view .pagination');
+  const startIdx = start + 1;
+  const endIdx = Math.min(start + PAGE_SIZE, total);
+  pagination.innerHTML = `
+    <span class="page-info">显示 ${startIdx}-${endIdx} 条，共 ${total} 条</span>
+    <div class="page-btns">
+      <button class="btn btn-secondary btn-sm" ${detailPage <= 1 ? 'disabled' : ''} onclick="goDetailPage(${detailPage - 1})">上一页</button>
+      ${Array.from({length: Math.min(5, totalPages)}, (_, i) => {
+        const p = i + 1;
+        return `<button class="btn btn-secondary btn-sm ${p === detailPage ? 'active' : ''}" onclick="goDetailPage(${p})">${p}</button>`;
+      }).join('')}
+      <button class="btn btn-secondary btn-sm" ${detailPage >= totalPages ? 'disabled' : ''} onclick="goDetailPage(${detailPage + 1})">下一页</button>
+    </div>
+  `;
+}
+
+function goDetailPage(page) {
+  detailPage = page;
+  renderDetailPage();
+  window.scrollTo(0, 0);
+}
+
+async function refreshDetail() {
+  if (!detailPodcastId) return;
+  // 清除缓存，强制重新加载
+  delete episodeCache[detailPodcastId];
+  toast('正在刷新...', 'info');
+  try {
+    const resp = await fetch(`/api/podcast/${detailPodcastId}/episodes`);
+    const data = await resp.json();
+    if (data.ok) {
+      episodeCache[detailPodcastId] = data.episodes;
+      detailPodcastName = data.podcast.name;
+      renderDetailPage();
+      toast('刷新成功', 'success');
+    }
+  } catch (e) {
+    toast('刷新失败', 'error');
+  }
+}
+
+async function downloadAllUndone() {
+  if (!detailPodcastId || !episodeCache[detailPodcastId]) return;
+  const episodes = episodeCache[detailPodcastId];
+  const undone = episodes.filter(e => !e.is_paid && e.status !== 'done_deleted');
+  if (undone.length === 0) {
+    toast('没有可下载的剧集', 'info');
+    return;
+  }
+  try {
+    const resp = await fetch('/api/episodes/enqueue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        podcast_id: detailPodcastId,
+        eids: undone.map(e => e.eid)
+      })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast(`已加入 ${data.count} 集到队列`, 'success');
+      loadQueue();
+    } else {
+      toast('加入队列失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    toast('加入队列失败', 'error');
+  }
+}
+
+async function openTxt(episodeId) {
+  try {
+    const resp = await fetch(`/api/episode/open/${episodeId}`);
+    const data = await resp.json();
+    if (!data.ok) {
+      toast(data.error || '打开失败', 'error');
+    }
+  } catch (e) {
+    toast('打开失败', 'error');
+  }
+}
+
+async function openPodcastFolder(podcastId) {
+  try {
+    const resp = await fetch(`/api/podcast/open/${podcastId}`);
+    const data = await resp.json();
+    if (!data.ok) {
+      toast(data.error || '打开失败', 'error');
+    }
+  } catch (e) {
+    toast('打开失败', 'error');
+  }
+}
+
+// ============ 队列视图 ============
+async function loadQueue() {
+  try {
+    const resp = await fetch('/api/queue');
+    const data = await resp.json();
+    // 用 API 数据更新走马灯缓存（作为 SSE 的补充，防止漏掉）
+    if (data.tasks) {
+      window._tickerTasks = data.tasks;
+      updateTicker(window._tickerTasks);
+    }
+    // 注意：renderQueue 是 queue.html 的渲染函数，主页不需要调用
+  } catch (e) {
+    console.error('加载队列失败:', e);
+  }
+}
+
+function updateTicker(tasks) {
+  const tickerItems = document.getElementById('ticker-items');
+  if (!tickerItems) {
+    console.warn('[Ticker] #ticker-items not found');
+    return;
+  }
+  console.log('[Ticker] tasks:', tasks.map(t => ({ eid: t.eid, status: t.status })));
+
+  // 优先显示正在处理的任务（包括刚入队等待处理的状态：pending/queued）
+  const current = tasks.find(t =>
+    t.status === 'downloading' || t.status === 'transcribing' ||
+    t.status === 'pending' || t.status === 'queued'
+  );
+  if (current) {
+    const pct = current.progress || 0;
+    let statusLabel = current.status === 'downloading' ? '音频下载中'
+      : current.status === 'transcribing' ? '音频转文字中'
+      : '排队中';
+    tickerItems.innerHTML = `
+      <span class="ticker-item">
+        <span class="name">${escapeHtml(current.podcast_name)}</span> — ${escapeHtml(current.name)}
+        ${pct > 0 ? `<span class="status">${pct}%</span>` : ''}
+        <span class="status">[${statusLabel}]</span>
+      </span>`;
+    return;
+  }
+
+  tickerItems.innerHTML = '<span class="ticker-empty">暂无正在处理的任务</span>';
+}
+
+// 维护一个简化版任务缓存，仅用于走马灯（SSE 实时更新）
+window._tickerTasks = [];
+
+// 每5秒同步一次首页状态：刷新所有展开的子表，保证状态最终一致
+async function syncHomepageStatus() {
+  for (const podcastId of Object.keys(episodeCache)) {
+    const expandedRow = document.getElementById(`expand-${podcastId}`);
+    if (expandedRow && expandedRow.style.display !== 'none') {
+      await refreshSubTable(parseInt(podcastId));
+    }
+  }
+}
+setInterval(syncHomepageStatus, 5000);
+
+function renderQueue(tasks) {
+  const container = document.getElementById('queue-items');
+  const currentArea = document.getElementById('queue-current');
+  const waitingTitle = document.getElementById('queue-waiting-title');
+
+  if (!tasks || tasks.length === 0) {
+    container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">暂无处理中的任务</div>';
+    currentArea.innerHTML = '';
+    waitingTitle.style.display = 'none';
+    return;
+  }
+
+  // 正在处理的那个（downloading 或 transcribing）
+  const current = tasks.find(t => t.status === 'downloading' || t.status === 'transcribing');
+  // 排队的（pending）
+  const waiting = tasks.filter(t => t.status === 'pending');
+  // 已完成的（done_deleted 或 failed）
+  const done = tasks.filter(t => t.status === 'done_deleted' || t.status === 'failed');
+
+  // 渲染当前处理中
+  if (current) {
+    const pct = current.progress || 0;
+    const elapsed = current.elapsed || 0;
+    const statusLabel = current.status === 'downloading' ? '音频下载中' : '音频转文字中';
+    currentArea.innerHTML = `
+      <div class="queue-current-card">
+        <div class="qc-title">🎧 ${escapeHtml(current.podcast_name)} — ${escapeHtml(current.name)}</div>
+        <div class="qc-progress-bar"><div class="qc-progress-fill" style="width:${pct}%"></div></div>
+        <div class="qc-meta">
+          <span class="qc-status">${statusLabel}</span>
+          <span class="qc-pct">${pct}%</span>
+          <span class="qc-time">已耗时 ${elapsed}秒</span>
+        </div>
+      </div>`;
+  } else {
+    currentArea.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-secondary);">暂无正在处理的任务</div>';
+  }
+
+  // 渲染排队列表
+  if (waiting.length > 0) {
+    waitingTitle.textContent = `排队中（共 ${waiting.length} 个）`;
+    waitingTitle.style.display = '';
+    container.innerHTML = waiting.map(task => {
+      return `<div class="queue-page-item status-pending">
+        <div class="qinfo">
+          <div class="qinfo-name">${escapeHtml(task.podcast_name)} — ${escapeHtml(task.name)}</div>
+        </div>
+        <span class="qstatus pending">排队中</span>
+      </div>`;
+    }).join('');
+  } else if (done.length > 0) {
+    // 没有等待中的任务，但有已完成的
+    waitingTitle.style.display = 'none';
+    // 直接渲染在 queue-items 内（不需要单独的 DOM 结构）
+    container.innerHTML = done.map(task => {
+      const isDone = task.status === 'done_deleted';
+      const isFailed = task.status === 'failed';
+      const timeStr = task.elapsed ? `用时 ${task.elapsed}秒` : '';
+      const errStr = isFailed && task.error ? ` — ${task.error}` : '';
+      const label = isDone ? '已完成' : '失败';
+      const cls = isDone ? 'done_deleted' : 'failed';
+      return `<div class="queue-page-item status-${cls}">
+        <div class="qinfo">
+          <div class="qinfo-name">${escapeHtml(task.podcast_name)} — ${escapeHtml(task.name)}</div>
+          ${timeStr || errStr ? `<div class="qinfo-sub">${timeStr}${errStr}</div>` : ''}
+        </div>
+        <span class="qstatus ${cls}">${label}</span>
+      </div>`;
+    }).join('');
+  } else {
+    waitingTitle.style.display = 'none';
+    container.innerHTML = '';
+  }
+}
+
+// ============ 视图切换 ============
+function showMainView() {
+  document.getElementById('main-view').classList.remove('hidden');
+  document.getElementById('detail-view').classList.add('hidden');
+}
+
+// ============ 删除播客 ============
+async function deletePodcast(podcastId) {
+  if (!confirm('确认删除该播客及其所有剧集？')) return;
+  try {
+    const resp = await fetch('/api/podcast/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ podcast_id: podcastId })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('删除成功', 'success');
+      // 移除该行
+      const row = document.querySelector(`.row-main[data-podcast="${podcastId}"]`);
+      if (row) {
+        const nextRow = row.nextElementSibling;
+        row.remove();
+        if (nextRow?.classList.contains('expanded-row')) nextRow.remove();
+      }
+      // 重新加载主视图
+      location.reload();
+    } else {
+      toast('删除失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    toast('删除失败', 'error');
+  }
+}
+
+// ============ 删除选中 ============
+function updateDeleteBtn() {
+  const checked = document.querySelectorAll('.podcast-check:checked');
+  const btn = document.getElementById('btn-delete-selected');
+  if (checked.length > 0) {
+    btn.disabled = false;
+    btn.classList.add('enabled');
+  } else {
+    btn.disabled = true;
+    btn.classList.remove('enabled');
+  }
+}
+
+async function doDeleteSelected() {
+  const checked = document.querySelectorAll('.podcast-check:checked');
+  if (checked.length === 0) return;
+  const count = checked.length;
+  document.getElementById('confirm-msg').textContent = `确认删除选中的 ${count} 个播客？`;
+  document.getElementById('confirm-dialog').classList.add('show');
+}
+
+async function confirmDelete() {
+  closeDialogs();
+  const checked = document.querySelectorAll('.podcast-check:checked');
+  let deleted = 0;
+  for (const cb of checked) {
+    const pid = parseInt(cb.dataset.pid);
+    try {
+      await fetch('/api/podcast/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ podcast_id: pid })
+      });
+      deleted++;
+    } catch (e) {}
+  }
+  toast(`已删除 ${deleted} 个播客`, 'success');
+  location.reload();
+}
+
+// ============ 刷新全部 ============
+async function refreshAll() {
+  const btn = document.getElementById('btn-refresh-all');
+  if (btn.classList.contains('loading')) return;
+
+  btn.classList.add('loading');
+  btn.innerHTML = '⏳ 刷新中...';
+
+  let totalNew = 0;
+  let updatedPodcasts = [];
+
+  try {
+    const rows = document.querySelectorAll('.row-main[data-podcast]');
+    const manualPodcastId = {{ manual_podcast_id }};
+    const promises = [];
+    for (const row of rows) {
+      const pid = parseInt(row.dataset.podcast);
+      if (pid === manualPodcastId) continue;
+      promises.push(
+        fetch('/api/episodes/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ podcast_id: pid })
+        }).then(r => r.json()).then(data => ({ pid, data }))
+        .catch(e => ({ pid, data: { ok: false } }))
+      );
+    }
+
+    const results = await Promise.all(promises);
+
+    for (const { pid, data } of results) {
+      if (data.ok && data.new_count > 0) {
+        totalNew += data.new_count;
+        updatedPodcasts.push({ name: data.podcast_name, newCount: data.new_count, pid });
+      }
+    }
+
+    // 从 DB 获取当前有 is_new 标记的播客列表，更新红点显示
+    const newIdsResp = await fetch('/api/podcasts/new-ids');
+    const newIdsData = await newIdsResp.json();
+    const newIds = new Set(newIdsData.new_podcast_ids || []);
+
+    // 刷新所有行的 badge 显示状态
+    document.querySelectorAll('.row-main[data-podcast]').forEach(row => {
+      const pid = parseInt(row.dataset.podcast);
+      if (newIds.has(pid)) {
+        showBadge(pid);
+      } else {
+        hideBadge(pid);
+      }
+    });
+
+    if (totalNew > 0) {
+      const lines = updatedPodcasts.map(p => `• ${p.name} 新增 ${p.newCount} 集`).join('\n');
+      toast(`🎉 ${updatedPodcasts.length} 个播客更新，共 ${totalNew} 条新集\n${lines}`, 'success');
+    } else {
+      toast('刷新完成，暂无更新', 'info');
+    }
+  } catch (e) {
+    toast('刷新失败', 'error');
+  } finally {
+    btn.classList.remove('loading');
+    btn.innerHTML = '🔄 全部刷新';
+  }
+}
+
+// ============ 订阅播客 ============
+async function subscribePodcast() {
+  const url = document.getElementById('sub-url').value.trim();
+  if (!url) {
+    toast('请输入播客链接', 'error');
+    return;
+  }
+
+  const btn = document.querySelector('#sub-dialog .btn-primary');
+  btn.dataset.originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '获取中...';
+
+  try {
+    const resp = await fetch('/api/podcast/fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast(`订阅成功: ${data.name}，共 ${data.episodes.length} 集`, 'success');
+      closeDialogs();
+      location.reload();
+    } else {
+      toast('订阅失败: ' + (data.error || '未知错误'), 'error');
+      closeDialogs();  // 失败时也关闭弹窗
+    }
+  } catch (e) {
+    toast('订阅失败: 网络错误', 'error');
+    closeDialogs();  // 失败时也关闭弹窗
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '获取';
+  }
+}
+
+// ============ 手动添加 ============
+async function addEpisode() {
+  const url = document.getElementById('add-url').value.trim();
+  if (!url) {
+    toast('请输入单集链接', 'error');
+    return;
+  }
+
+  const btn = document.querySelector('#add-dialog .btn-primary');
+  btn.dataset.originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '添加中...';
+
+  try {
+    const resp = await fetch('/api/episode/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast(`添加成功: ${data.name}`, 'success');
+      closeDialogs();
+      // 清空剧集缓存，确保展开时重新加载最新数据
+      episodeCache = {};
+      loadQueue();
+    } else {
+      toast('添加失败: ' + (data.error || '未知错误'), 'error');
+      closeDialogs();
+    }
+  } catch (e) {
+    toast('添加失败', 'error');
+    closeDialogs();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = btn.dataset.originalText || '添加';
+  }
+}
+
+// ============ 加入队列 ============
+async function enqueueEpisode(episodeId, podcastId) {
+  // 防重：已经在排队中或处理中则忽略
+  const cached = episodeCache[podcastId]?.find(e => e.id === episodeId);
+  if (cached && ['queued', 'downloading', 'transcribing'].includes(cached.status)) {
+    return;
+  }
+
+  try {
+    // 先立即更新本地缓存状态，避免等待API返回
+    if (episodeCache[podcastId]) {
+      const ep = episodeCache[podcastId].find(e => e.id === episodeId);
+      if (ep) {
+        ep.status = 'queued';  // queued 会显示"排队中"，SSE 更新后会变成正确的状态
+        // 立即刷新子表UI（乐观更新）
+        if (currentExpanded) {
+          const mainRow = currentExpanded.previousElementSibling;
+          if (mainRow && parseInt(mainRow.dataset.podcast) === podcastId) {
+            renderSubTable(podcastId, episodeCache[podcastId].slice(0, 5));
+          }
+        }
+        // 详情页也在显示的话，也要更新
+        if (detailPodcastId === podcastId) {
+          renderDetailPage();
+        }
+      }
+    }
+
+    const resp = await fetch('/api/episodes/enqueue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ episode_ids: [episodeId] })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('已加入队列', 'success');
+      // 不依赖 loadQueue/refreshSubTable 刷新子表——它们可能用旧数据覆盖
+      // SSE 事件会在任务状态变化时更新 UI
+      if (detailPodcastId === podcastId) {
+        renderDetailPage();
+      }
+    } else {
+      // 回滚本地缓存状态
+      if (episodeCache[podcastId]) {
+        const ep = episodeCache[podcastId].find(e => e.id === episodeId);
+        if (ep) ep.status = 'pending';
+      }
+      toast('加入队列失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    // 回滚本地缓存状态
+    if (episodeCache[podcastId]) {
+      const ep = episodeCache[podcastId].find(e => e.id === episodeId);
+      if (ep) ep.status = 'pending';
+    }
+    toast('加入队列失败', 'error');
+  }
+}
+
+// ============ 继续暂停的任务 ============
+async function resumeEpisode(episodeId) {
+  try {
+    const resp = await fetch(`/api/episode/resume/${episodeId}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('已继续处理', 'success');
+      loadQueue();
+      // 刷新展开的子表
+      if (currentExpanded) {
+        const mainRow = currentExpanded.previousElementSibling;
+        if (mainRow && mainRow.classList.contains('row-main')) {
+          await refreshSubTable(parseInt(mainRow.dataset.podcast));
+        }
+      }
+    } else {
+      toast('继续失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    toast('继续失败', 'error');
+  }
+}
+
+// ============ 失败任务弹框 ============
+let _failedDialogEpisodeId = null;
+
+async function showFailedDialog(episodeId) {
+  _failedDialogEpisodeId = episodeId;
+  // 先获取错误信息
+  let errorMsg = '任务处理失败';
+  try {
+    const resp = await fetch(`/api/episode/${episodeId}`);
+    const data = await resp.json();
+    if (data.episode && data.episode.error_msg) {
+      errorMsg = data.episode.error_msg;
+    }
+  } catch (e) {}
+
+  const overlay = document.getElementById('error-dialog-overlay');
+  document.getElementById('error-msg-text').textContent = errorMsg;
+  // 清空 footer，添加自定义按钮
+  const footer = document.querySelector('#error-dialog-overlay .dialog-footer');
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="closeErrorDialog()">取消</button>
+    <button class="btn btn-primary" onclick="retryFailedEpisode()">重新开始</button>
+  `;
+  overlay.style.display = 'flex';
+}
+
+async function retryFailedEpisode() {
+  if (!_failedDialogEpisodeId) return;
+  const episodeId = _failedDialogEpisodeId;
+  closeErrorDialog();
+  try {
+    const resp = await fetch(`/api/episode/retry/${episodeId}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('已重新加入队列', 'success');
+      loadQueue();
+      if (currentExpanded) {
+        const mainRow = currentExpanded.previousElementSibling;
+        if (mainRow && mainRow.classList.contains('row-main')) {
+          await refreshSubTable(parseInt(mainRow.dataset.podcast));
+        }
+      }
+    } else {
+      toast('重新开始失败: ' + (data.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    toast('重新开始失败', 'error');
+  }
+  _failedDialogEpisodeId = null;
+}
+
+function closeErrorDialog() {
+  document.getElementById('error-dialog-overlay').style.display = 'none';
+  // 恢复 footer
+  const footer = document.querySelector('#error-dialog-overlay .dialog-footer');
+  footer.innerHTML = `<button class="btn btn-primary" onclick="closeErrorDialog()">关闭</button>`;
+  _failedDialogEpisodeId = null;
+}
+
+async function refreshPodcast(podcastId) {
+  const btn = document.querySelector(`button[onclick*="refreshPodcast(${podcastId})"]`);
+  if (btn) { btn.disabled = true; }
+  try {
+    const resp = await fetch('/api/episodes/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ podcast_id: podcastId })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast(`已刷新 "${data.podcast_name}"`, 'success');
+      // 根据 DB 中的 is_new 标记更新红点
+      const newIdsResp = await fetch('/api/podcasts/new-ids');
+      const newIdsData = await newIdsResp.json();
+      const newIds = new Set(newIdsData.new_podcast_ids || []);
+      if (newIds.has(podcastId)) {
+        showBadge(podcastId);
+      } else {
+        hideBadge(podcastId);
+      }
+      await refreshSubTable(podcastId);
+    } else {
+      toast('刷新失败', 'error');
+    }
+  } catch (e) {
+    toast('刷新失败', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; }
+  }
+}
+
+// ============ 对话框 ============
+function showSubDialog() { document.getElementById('sub-dialog').classList.add('show'); }
+function showAddDialog() { document.getElementById('add-dialog').classList.add('show'); }
+function closeDialogs() {
+  // 关闭所有弹窗，并恢复按钮状态
+  document.querySelectorAll('.dialog-overlay').forEach(el => el.classList.remove('show'));
+  document.querySelectorAll('.dialog .btn-primary').forEach(btn => {
+    btn.disabled = false;
+    btn.textContent = btn.dataset.originalText || '获取';
+  });
+  document.querySelectorAll('.dialog .btn-secondary').forEach(btn => {
+    btn.disabled = false;
+  });
+}
+
+// ============ 红点持久化 ============
+// 显示红点
+function showBadge(podcastId) {
+  const badge = document.getElementById(`badge-${podcastId}`);
+  if (badge) badge.style.display = 'inline-block';
+}
+
+// 隐藏红点
+function hideBadge(podcastId) {
+  const badge = document.getElementById(`badge-${podcastId}`);
+  if (badge) badge.style.display = 'none';
+}
+
+// 标记播客已读（收起时调用），清除 DB 中的 is_new 标记
+async function markPodcastViewed(podcastId) {
+  try {
+    await fetch(`/api/podcast/viewed/${podcastId}`, { method: 'POST' });
+  } catch (e) {}
+  hideBadge(podcastId);
+}
+
+// 页面加载时恢复小红点（基于 new_podcast_ids 模板变量）
+function restoreBadges(newPodcastIds) {
+  (newPodcastIds || []).forEach(pid => showBadge(pid));
+}
+
+// ============ 初始化 ============
+// 格式化主表格的日期列（显示月日时分秒）
+document.querySelectorAll('td.date-cell[data-date]').forEach(td => {
+  const d = td.dataset.date;
+  if (d) {
+    const date = new Date(d);
+    if (!isNaN(date)) {
+      const m = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      const hh = date.getHours().toString().padStart(2, '0');
+      const mm = date.getMinutes().toString().padStart(2, '0');
+      const ss = date.getSeconds().toString().padStart(2, '0');
+      td.textContent = `${m}-${day} ${hh}:${mm}:${ss}`;
+    }
+  }
+});
+
+document.getElementById('btn-delete-selected').addEventListener('click', doDeleteSelected);
+document.querySelectorAll('.dialog-overlay').forEach(el => {
+  el.addEventListener('click', e => { if (e.target === el) closeDialogs(); });
+});
+
+// 订阅对话框获取按钮
+document.querySelector('#sub-dialog .btn-primary').addEventListener('click', subscribePodcast);
+// 手动添加对话框添加按钮
+document.querySelector('#add-dialog .btn-primary').addEventListener('click', addEpisode);
+
+// 轮询队列
+setInterval(loadQueue, 3000);
+
+// SSE 实时更新：任务完成时刷新子表状态
+const homeEvtSource = new EventSource('/sse/stream');
+homeEvtSource.onerror = () => {
+  console.warn('[SSE] 连接断开，3秒后重连...');
+};
+homeEvtSource.addEventListener('task_update', (e) => {
+  const task = JSON.parse(e.data);
+  console.log('[SSE] task_update:', task.eid, task.status);
+  // 1. 更新 _tickerTasks（走马灯用的缓存）
+  const tIdx = window._tickerTasks.findIndex(t => t.eid === task.eid);
+  if (tIdx >= 0) {
+    window._tickerTasks[tIdx] = { ...window._tickerTasks[tIdx], ...task };
+  } else {
+    window._tickerTasks.push(task);
+  }
+  updateTicker(window._tickerTasks);
+
+  // 2. 更新 episodeCache 中对应 episode 的状态（不重新拉数据）
+  for (const podcastId of Object.keys(episodeCache)) {
+    const ep = episodeCache[podcastId].find(ep => ep.eid === task.eid);
+    if (ep) {
+      ep.status = task.status;
+      ep.progress = task.progress;
+      ep.elapsed = task.elapsed;
+      ep.status_text = task.status_text;
+    }
+  }
+  // 不在这里调用 renderSubTable —— loadQueue 的定时器会在 3 秒内覆盖
+  // 详情页需要更新（它是用户主动打开的视图）
+  if (detailPodcastId && episodeCache[detailPodcastId]?.find(ep => ep.eid === task.eid)) {
+    renderDetailPage();
+  }
+});
+homeEvtSource.addEventListener('task_done', async (e) => {
+  const task = JSON.parse(e.data);
+  console.log('[SSE] task_done:', task.eid);
+  // 1. 更新走马灯缓存
+  const tIdx = window._tickerTasks.findIndex(t => t.eid === task.eid);
+  if (tIdx >= 0) {
+    window._tickerTasks[tIdx].status = 'done_deleted';
+  }
+  updateTicker(window._tickerTasks);
+
+  // 2. 强制刷新用户当前可见的视图，不依赖 episodeCache（刷新后可能为空）
+  if (currentExpanded) {
+    const mainRow = currentExpanded.previousElementSibling;
+    if (mainRow && mainRow.classList.contains('row-main')) {
+      await refreshSubTable(parseInt(mainRow.dataset.podcast));
+    }
+  }
+  if (detailPodcastId) {
+    await refreshSubTable(detailPodcastId);
+    renderDetailPage();
+  }
+});
+
+homeEvtSource.addEventListener('task_new', (e) => {
+  const task = JSON.parse(e.data);
+  console.log('[SSE] task_new:', task.eid, task.status);
+  if (!window._tickerTasks.find(t => t.eid === task.eid)) {
+    window._tickerTasks.push(task);
+  }
+  updateTicker(window._tickerTasks);
+});
+
+// 初始加载队列
+loadQueue();
+
+// 页面加载时恢复小红点（基于 DB is_new 标记）
+restoreBadges({{ new_podcast_ids | tojson }});
+</script>
+</body>
+</html>
+
+
+// ============ 详情页自动初始化 ============
+window.addEventListener("DOMContentLoaded", () => {
+  const pid = {{ podcast.id }};  // Jinja2: podcast id from app.py
+  if (pid) showDetail(pid);
+}});

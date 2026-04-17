@@ -2,8 +2,7 @@
 队列相关路由
 /api/queue/*
 """
-from pathlib import Path
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify
 
 import db
 import worker as w
@@ -15,38 +14,20 @@ queue_bp = Blueprint("queue", __name__, url_prefix="/api/queue")
 @queue_bp.route("/stop", methods=["GET", "POST"])
 def api_queue_stop():
     """
-    终止当前正在处理的任务：ffprobe 验证音频，广播 SSE 让前端弹框。
-    实际杀子进程和改 DB 由用户在弹框中选择"继续/暂停/重置"后触发。
+    终止当前正在处理的任务（简单粗暴版）：
+    - worker 线程内部杀进程 + 删音频文件
+    - DB 状态改 pending
+    - 广播 SSE，前端自动刷新
     """
-    task_info = w.get_current_task_info()
+    episode_id = w.terminate_current_task()
 
-    episode_id = task_info["id"] if task_info else None
-    eid = task_info["eid"] if task_info else ""
-    episode_name = task_info["name"] if task_info else ""
-    podcast_name = task_info.get("podcast_name", "") if task_info else ""
+    if episode_id:
+        db.update_episode_status(episode_id, "pending", txt_path="", error_msg="")
 
-    audio_file = w.get_current_audio_file()
-    audio_complete = False
-    if audio_file and Path(audio_file).exists():
-        audio_complete = w._verify_audio_complete(audio_file)
-        print(f"[终止] ffprobe audio_complete={audio_complete}, file={audio_file}")
-    else:
-        print(f"[终止] 音频文件不存在或路径为空, audio_file={audio_file}")
+    # 必须在 DB 更新之后再广播，否则前端 SSE 触发 loadQueue 时 DB 还是旧状态
+    broadcast_sse("task_stopped", {"episode_id": episode_id})
 
-    # 音频不完整时，立即设置终止标记让 worker 杀子进程
-    # 音频完整时不设置——子进程继续运行，等用户在弹框中选择
-    if not audio_complete:
-        w.set_task_terminated()
-
-    broadcast_sse("task_stop", {
-        "eid": eid,
-        "episode_id": episode_id,
-        "name": episode_name,
-        "podcast_name": podcast_name,
-        "audio_complete": audio_complete,
-    })
-
-    return jsonify({"ok": True, "audio_complete": audio_complete, "episode_id": episode_id})
+    return jsonify({"ok": True, "episode_id": episode_id})
 
 
 @queue_bp.route("")

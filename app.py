@@ -222,15 +222,7 @@ def podcast_detail(podcast_id: int):
     ).fetchone()
     if not podcast:
         return redirect(url_for("index"))
-    episodes = db.list_episodes_by_podcast(podcast_id)
-    manual_podcast_id = db.get_or_create_manual_podcast()
-    return render_template(
-        "new_index.html",
-        podcast_detail=True,
-        podcast=dict(podcast),
-        episodes=episodes,
-        manual_podcast_id=manual_podcast_id,
-    )
+    return render_template("podcast_detail.html", podcast=dict(podcast), new_podcast_ids=[])
 
 
 @app.route("/settings", methods=["POST"])
