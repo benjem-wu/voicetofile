@@ -1672,7 +1672,7 @@ async function enqueueEpisode(episodeId, podcastId) {
     const resp = await fetch('/api/episodes/enqueue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ podcast_id: podcastId, eids: [episodeCache[podcastId]?.find(e => e.id === episodeId)?.eid] })
+      body: JSON.stringify({ episode_ids: [episodeId] })
     });
     const data = await resp.json();
     if (data.ok) {
