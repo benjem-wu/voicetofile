@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # VoiceToFile 播客转文字工具 — 项目知识快照
 
 > 本文件是 Claude Code 的项目上下文文件，每次对话开始时自动加载。
@@ -84,7 +88,7 @@ app.py（~230行）
 
 ### 分支策略
 
-- `main` — 稳定版
+- `master` — 稳定版
 
 ---
 
@@ -554,4 +558,83 @@ routes/system.py    → db.*, config.*, sse.sse_subscribers/sse_lock
 
 ---
 
-*最后更新：2026-04-17*
+## 20. 待实现功能
+
+### 20.1 播客详情表（podcast_details）
+
+> 方案：新建 `podcast_details` 表，podcasts 表保持不变。
+
+**背景**：列表页可抓取更多元数据（作者、订阅数、节目简介等），但当前只存了 name。这些数据适合独立存储，不污染 podcasts 表。
+
+### podcast_details 表（新增）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| podcast_id | INTEGER PK, FK | 关联 podcasts.id，一对一 |
+| author | TEXT | 作者/主播名 |
+| description | TEXT | 节目简介 |
+| cover_url | TEXT | 封面图 URL |
+| subscriber_count | INTEGER | 订阅数 |
+| episode_count | INTEGER | 总集数 |
+| play_count | INTEGER | 播放量（若有） |
+| updated_at | TIMESTAMP | 最后同步时间 |
+
+**关联关系**：`podcasts` : `podcast_details` = 1 : 1，`podcast_id` 作为主键兼外键。
+
+**抓取来源**：从播客列表页 HTML 的 JSON-LD 或 `<script>` 标签提取。
+
+**UI 用途**：
+- 播客卡片显示作者名、订阅数
+- 详情页显示节目简介、封面图
+
+### 20.2 刷新时 audio_url 过滤
+
+> 修复"半拿铁 | 商业沉浮录"等假数据入库问题。
+
+**问题**：`scraper.py` 抓取时不验证音频 URL，导致无音频的占位集（eids: 379, 383, 387, 388, 393 等）通过 `_is_placeholder()` 检查（只过滤 name < 7 字）进入 DB。
+
+**修复**：刷新/添加播客时，episode 必须满足以下条件才入 DB：
+
+```
+条件A: 有 audio_url（非空字符串）
+条件B: _is_placeholder() 返回 False（name >= 7 字，且含有效标题）
+同时满足 A 或 B 之一即可入库。
+```
+
+**实现位置**：`routes/episodes.py` 的 `api_refresh_episodes()` 或 `scraper.py` 的 `add_episodes()`。
+
+---
+
+## 21. 避免级联改动的经验总结
+
+### 核心原则
+
+| 原则 | 说明 | 例子 |
+|------|------|------|
+| **单一数据源** | 同一份数据只在一个地方定义/存储 | queue v2: 任务状态只在 DB，不在内存 |
+| **明确边界** | 模块之间通过接口交互，不直接读写内部状态 | routes 只调 db.*，不直接操作 SQLite 连接 |
+| **先想后改** | 改一个地方时，先列出所有"下游消费者"再动手 | 改 `episodes.status` 枚举值 → 检查 worker.py, routes/, 前端 JS |
+| **向后兼容** | DB 字段只增不改类型，只删不用字段 | `episodes.audio_path` 废弃但保留列 |
+| **独立部署** | 每个功能可独立测试 | scraper.py 单独跑，不依赖 Flask |
+
+### 级联改动高发场景
+
+| 场景 | 风险 | 防御 |
+|------|------|------|
+| 新增 DB 字段 | 旧代码不读/报错 | 先加列（DEFAULT NULL），再改读写逻辑 |
+| 新增 API 参数 | 旧前端不传 | 设默认值，前端渐进升级 |
+| 修改状态流转 | worker/前端/DB 三处不一致 | 先画状态图，再改代码 |
+| 重构共享函数 | 多个调用方行为不同 | 先抽象接口，逐一迁移调用方 |
+| 前端模板拆出子模板 | 变量传递遗漏 | 新模板独立渲染，先用 iframe 测试 |
+
+### 具体做法
+
+1. **改前先隔离测试**：改 `db.py` 之前，先用 `python -c "from db import *; ..."` 单独验证 SQL
+2. **改后立即验证**：每改一个文件，立即跑一遍相关功能（不要攒很多改一起测）
+3. **用 git diff --stat 看影响面**：`git diff` 列出改动文件，评估是否有多处改动应该分开提交
+4. **注释"合约"而非实现**：函数 docstring 写清楚"输入什么、输出什么、副作用什么"，不写"怎么做的"
+5. **CI 思维**：如果条件允许，写最小化的 smoke test（比如访问 `/api/queue` 不报错）
+
+---
+
+*最后更新：2026-04-18*
