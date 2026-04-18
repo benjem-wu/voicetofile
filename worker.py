@@ -24,8 +24,9 @@ import config
 
 # --------------- 全局状态（进程级别）---------------
 
-# 当前 subprocess 引用（用于 kill）
-_proc_to_kill = None
+# 当前 subprocess 引用（分开存储，终止时杀正确的进程）
+_download_proc = None   # download() 内部的 yt-dlp subprocess
+_transcribe_proc = None # _run_transcriber_subprocess 的 transcriber subprocess
 
 # 标记当前任务已被 api_queue_stop 提前终止
 _task_terminated = False
@@ -85,7 +86,7 @@ def _verify_audio_complete(audio_file: str) -> bool:
 
 def _process_task(task: dict):
     """处理单个 episode：下载 → 转写 → 清理。"""
-    global _proc_to_kill, _task_terminated, _current_task_info, _current_audio_file, _current_output_dir
+    global _download_proc, _transcribe_proc, _task_terminated, _current_task_info, _current_audio_file, _current_output_dir
 
     episode_id = task["id"]
     eid = task["eid"]
@@ -113,8 +114,13 @@ def _process_task(task: dict):
 
         # ---- 下载音频 ----
         dl = downloader.Downloader(output_dir)
+        dl_proc_ref = {}
         dl_result = dl.download(ep_detail.audio_url, episode_name, eid,
-                               check_terminated=lambda: _task_terminated)
+                               check_terminated=lambda: _task_terminated,
+                               proc_ref=dl_proc_ref,
+                               timeout=config.DOWNLOAD_TIMEOUT)
+        if dl_result["ok"]:
+            _download_proc = dl_proc_ref.get("proc")
         if not dl_result["ok"]:
             raise ValueError(f"下载失败: {dl_result.get('error', '未知错误')}")
 
@@ -191,13 +197,20 @@ def _process_task(task: dict):
     finally:
         print(f"[finally] episode_id={episode_id} eid={eid} _task_terminated={_task_terminated}")
         # 杀子进程（如果还在运行）
-        if _proc_to_kill is not None:
+        if _download_proc is not None:
             try:
-                _proc_to_kill.kill()
-                _proc_to_kill.wait()
+                _download_proc.kill()
+                _download_proc.wait()
             except Exception:
                 pass
-            _proc_to_kill = None
+            _download_proc = None
+        if _transcribe_proc is not None:
+            try:
+                _transcribe_proc.kill()
+                _transcribe_proc.wait()
+            except Exception:
+                pass
+            _transcribe_proc = None
 
         # _task_terminated=True 时，DB 状态和广播由 terminate_current_task() 统一处理
         # 这里只清状态
@@ -214,7 +227,7 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
     启动子进程运行转写，带超时保护。
     使用线程读取 stdout，解决 Windows select() 对管道无效的问题。
     """
-    global _proc_to_kill
+    global _transcribe_proc
     transcriber_py = config.PROJECT_ROOT / "transcriber.py"
 
     cmd = [
@@ -242,7 +255,7 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
         encoding='utf-8',
         errors='replace',
     )
-    _proc_to_kill = proc
+    _transcribe_proc = proc
 
     out_queue: queue.Queue = queue.Queue(maxsize=100)
 
@@ -317,7 +330,7 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
         return {"ok": False, "error": f"转写进程异常退出: {proc.returncode}"}
 
     finally:
-        _proc_to_kill = None
+        _transcribe_proc = None
 
 
 # --------------- Worker 循环 ---------------
@@ -332,13 +345,6 @@ def _queue_worker():
             _start_task_thread(task)
         else:
             time.sleep(config.WORKER_POLL_INTERVAL)
-
-
-def _start_task_thread(task: dict):
-    """启动任务处理线程（t.join() 阻塞，等待任务完全结束）"""
-    t = threading.Thread(target=_process_task, args=(task,), daemon=True)
-    t.start()
-    t.join()
 
 
 # --------------- Worker 线程管理（供 api_queue_stop 等待终止完成）---------------
@@ -363,16 +369,23 @@ def wait_for_worker_exit():
         _current_worker_thread.join(timeout=60)
 
 
-def terminate_subprocess():
-    """杀掉转写子进程（供 api_queue_stop 调用）"""
-    global _proc_to_kill
-    if _proc_to_kill is not None:
+def kill_active_subprocess():
+    """杀掉当前活跃的子进程（download 或 transcribe）"""
+    global _download_proc, _transcribe_proc
+    if _download_proc is not None:
         try:
-            _proc_to_kill.kill()
-            _proc_to_kill.wait()
+            _download_proc.kill()
+            _download_proc.wait()
         except Exception:
             pass
-        _proc_to_kill = None
+        _download_proc = None
+    if _transcribe_proc is not None:
+        try:
+            _transcribe_proc.kill()
+            _transcribe_proc.wait()
+        except Exception:
+            pass
+        _transcribe_proc = None
 
 
 def reset_termination_state():
@@ -408,20 +421,14 @@ def terminate_current_task():
     在 worker 线程内部执行终止逻辑（杀进程 + 删文件 + 返回 episode_id）。
     供 routes/queue.py 的 api_queue_stop 调用。
     """
-    global _task_terminated, _proc_to_kill, _current_task_info, _current_audio_file, _current_output_dir
+    global _task_terminated, _current_task_info, _current_audio_file, _current_output_dir
 
     _task_terminated = True
 
     episode_id = _current_task_info.get("id") if _current_task_info else None
 
-    # 杀子进程
-    if _proc_to_kill is not None:
-        try:
-            _proc_to_kill.kill()
-            _proc_to_kill.wait()
-        except Exception:
-            pass
-        _proc_to_kill = None
+    # 杀子进程（download 和 transcribe 各自杀自己的）
+    kill_active_subprocess()
 
     # 删音频文件
     audio_path = _current_audio_file

@@ -66,6 +66,8 @@ class Downloader:
         eid: str,
         progress_callback=None,
         check_terminated=None,
+        proc_ref=None,
+        timeout=None,
     ) -> dict:
         """
         下载音频文件。
@@ -76,12 +78,13 @@ class Downloader:
             eid: 用于进度文件命名
             progress_callback: 回调函数，接收 (bytes_downloaded, total_bytes)
             check_terminated: 可调用函数，返回 True 表示已终止，应停止下载
+            proc_ref: 字典，调用后其中会存入 {"proc": subprocess.Popen 对象}，供外部 kill
+            timeout: 下载超时秒数（默认 DOWNLOAD_TIMEOUT）
 
         Returns:
             {"ok": True, "file": "path/to/audio.m4a"}
             或 {"ok": False, "error": "错误信息"}
         """
-        pid = os.getpid()
         clean_name = sanitize_filename(episode_name)
         audio_path = self.output_dir / f"{clean_name}.m4a"
 
@@ -114,30 +117,41 @@ class Downloader:
                 encoding='utf-8',
                 errors='replace',
             )
+            if proc_ref is not None:
+                proc_ref["proc"] = proc
 
             last_pct = 2
             _start = time.time()
+            _timeout = timeout if timeout is not None else 1800  # 默认30分钟
 
-            # 读取 yt-dlp 输出（-v info 模式）
-            # yt-dlp 在下载中会输出类似：[download]  10.5% of   45.32MiB at   1.23MiB/s ETA 00:35
+            # 读取 yt-dlp 输出，解析进度，同时处理终止和超时
             while True:
-                # 使用非阻塞方式检查终止标志（每0.5秒检查一次）
+                # 终止检查
                 if check_terminated and check_terminated():
                     proc.kill()
                     proc.wait()
                     return {"ok": False, "error": "已终止"}
-                # 使用 poll() + sleep 实现非阻塞读取
+
+                # 读一行输出（非阻塞）
                 line = proc.stdout.readline()
                 if not line:
-                    if proc.poll() is not None:
+                    # 无输出：检查进程是否已结束
+                    rc = proc.poll()
+                    if rc is not None:
+                        return_code = rc
                         break
+                    # 未结束：超时检查 + 等待
+                    elapsed = time.time() - _start
+                    if elapsed > _timeout:
+                        proc.kill()
+                        proc.wait()
+                        return {"ok": False, "error": f"下载超时（{_timeout}秒）"}
                     time.sleep(0.5)
                     continue
-                line = line.strip()
 
+                line = line.strip()
                 # 解析下载进度
                 if line.startswith("[download]"):
-                    # 格式: "  10.5% of   45.32MiB at   1.23MiB/s ETA 00:35"
                     parts = line.split()
                     if len(parts) >= 1 and "%" in parts[0]:
                         try:
@@ -147,23 +161,12 @@ class Downloader:
                             elapsed = int(time.time() - _start)
                             if final_pct != last_pct:
                                 push_status(f"[{final_pct}%] 下载中... ({elapsed}秒)")
-                                # 写进度文件
                                 self._write_progress(eid, final_pct)
                                 last_pct = final_pct
                         except (ValueError, IndexError):
                             pass
 
-            # 使用非阻塞 wait + 终止检查
-            while True:
-                if check_terminated and check_terminated():
-                    proc.kill()
-                    proc.wait()
-                    return {"ok": False, "error": "已终止"}
-                return_code = proc.poll()
-                if return_code is not None:
-                    break
-                time.sleep(0.5)
-
+            # yt-dlp 进程已结束，检查返回码
             if return_code != 0:
                 stderr_text = proc.stderr.read() if proc.stderr else ""
                 push_status(f"[错误] 下载失败: {stderr_text[:200]}")

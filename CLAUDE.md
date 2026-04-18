@@ -430,6 +430,8 @@ python -m playwright install chromium
 | 2026-04-17 | 终止按钮设计过于复杂（ffprobe 验证 + 弹框选择） | 简化为：直接杀进程 + 删音频文件 + 改 pending，worker finally 不写 DB |
 | 2026-04-18 | 播客列表页同标题出现多条（Vol.261、Vol.260 等重复） | 小宇宙同一标题发布多个录音（不同 duration，如 28min vs 87min），按 duration 去重：保留最长版，短版标记 `discarded=1` 不展示 |
 | 2026-04-18 | 刷新播客时短版重复入库 | 新增入库前去重逻辑：`api_refresh_episodes` 入库前比对同名 episode，时长更短者标记 discarded 后跳过入库 |
+| 2026-04-18 | 终止任务无响应（根因：0311d85引入） | `_proc_to_kill` 被 download 覆盖导致杀错进程；`_start_task_thread` 重复定义导致 `_current_worker_thread` 始终为 None；改为 `_download_proc`/`_transcribe_proc` 分开存储 + `kill_active_subprocess()` 统一杀进程 |
+| 2026-04-18 | 下载无超时保护 | `DOWNLOAD_TIMEOUT=1800` 在代码中定义但从未接入；接入 downloader 并在无输出时检查超时 |
 
 ---
 
