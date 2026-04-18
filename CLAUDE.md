@@ -432,6 +432,7 @@ python -m playwright install chromium
 | 2026-04-18 | 刷新播客时短版重复入库 | 新增入库前去重逻辑：`api_refresh_episodes` 入库前比对同名 episode，时长更短者标记 discarded 后跳过入库 |
 | 2026-04-18 | 终止任务无响应（根因：0311d85引入） | `_proc_to_kill` 被 download 覆盖导致杀错进程；`_start_task_thread` 重复定义导致 `_current_worker_thread` 始终为 None；改为 `_download_proc`/`_transcribe_proc` 分开存储 + `kill_active_subprocess()` 统一杀进程 |
 | 2026-04-18 | 下载无超时保护 | `DOWNLOAD_TIMEOUT=1800` 在代码中定义但从未接入；接入 downloader 并在无输出时检查超时 |
+| 2026-04-18 | 转写进度卡住（0%→10%→0% 循环） | transcriber.py 缺 `import subprocess` 导致所有转写立即失败；`subprocess.run/Popen` 调用处无 import；新增状态文件架构 `_transcribe_state_{episode_id}.json` 作为权威进度来源，worker.py 每秒轮询，替代脆弱的 stdout 解析 |
 
 ---
 
@@ -522,7 +523,8 @@ loop → get_next_queued_task()
 ### worker.py 全局状态（进程级别）
 
 ```python
-_proc_to_kill       # 当前 subprocess（用于 kill）
+_download_proc      # 当前 download subprocess（用于 kill）
+_transcribe_proc    # 当前 transcribe subprocess（用于 kill）
 _task_terminated    # 标记任务被提前终止
 _current_task_info  # 当前任务信息（供 api_queue_stop 获取 episode_id）
 _current_audio_file # 当前音频文件路径（供终止时验证）
@@ -530,6 +532,30 @@ _current_output_dir # 当前输出目录（供终止时清理 progress 文件）
 ```
 
 对外：`get_current_task_info()`、`get_current_audio_file()`、`set_task_terminated()`、`is_task_terminated()`、`terminate_current_task()`
+
+### 转写状态文件架构
+
+transcriber.py 子进程写入 `_transcribe_state_{episode_id}.json`（权威来源），worker.py 每秒轮询更新 DB + SSE。
+
+```text
+transcriber.py（子进程）
+    │
+    ├── 写 _transcribe_state_{episode_id}.json（原子写入，先写 .tmp 再 rename）
+    │       字段：status / progress / status_text / result / error / updated_at
+    │
+    └── 打印 RESULT:（兜底，进程异常退出时读）
+
+worker.py（主进程）
+    │
+    ├── _poll_transcribe_state() 每秒轮询状态文件
+    │       → db.update_task_progress()
+    │       → task_update() → SSE 推前端
+    │
+    └── 进程退出时：状态文件 result（第一优先）
+                  → stdout RESULT:（兜底）
+```
+
+状态文件路径：`{output_dir}/_transcribe_state_{episode_id}.json`
 
 ### 与旧架构对比
 

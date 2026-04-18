@@ -253,12 +253,55 @@ def _process_task(task: dict):
         _current_output_dir = None
 
 
+def _read_transcribe_state(output_dir: Path, episode_id: int) -> dict | None:
+    """
+    读取转写状态文件，返回 dict 或 None。
+    状态文件路径：_transcribe_state_{episode_id}.json
+    """
+    state_file = output_dir / f"_transcribe_state_{episode_id}.json"
+    if not state_file.exists():
+        return None
+    try:
+        with open(state_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _poll_transcribe_state(output_dir: Path, episode_id: int, eid: str,
+                            last_progress: list) -> int:
+    """
+    轮询转写状态文件，更新 DB + SSE。
+    last_progress: [int]，传出最新 progress，供调用方追踪。
+    返回最新的 progress 值（未变化返回 last_progress[0]）。
+    """
+    state = _read_transcribe_state(output_dir, episode_id)
+    if state is None:
+        return last_progress[0]
+
+    status = state.get("status", "")
+    progress = state.get("progress", 0)
+    status_text = state.get("status_text", "")
+
+    # 有新的文字状态时推送给前端
+    if status_text:
+        task_update(eid, status="transcribing", progress=progress, status_text=status_text)
+
+    # progress 变化时写 DB（避免频繁写入）
+    if progress != last_progress[0]:
+        db.update_task_progress(episode_id, progress)
+        last_progress[0] = progress
+
+    return progress
+
+
 def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name: str,
                                  episode_url: str, eid: str, episode_id: int,
                                  timeout: int = 7200) -> dict:
     """
     启动子进程运行转写，带超时保护。
-    使用线程读取 stdout，解决 Windows select() 对管道无效的问题。
+    进度来源：状态文件（_transcribe_state_{episode_id}.json，权威）
+    RESULT 兜底：进程退出时从状态文件读（万一状态文件未写入则从 stdout 读）
     """
     global _transcribe_proc
     transcriber_py = config.PROJECT_ROOT / "transcriber.py"
@@ -270,6 +313,7 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
         str(output_dir),
         episode_name,
         episode_url,
+        str(episode_id),
     ]
 
     env = {
@@ -310,6 +354,7 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
 
     result = None
     start_ts = time.time()
+    last_progress = [0]  # 用于 _poll_transcribe_state 追踪 progress 变化
 
     try:
         while True:
@@ -319,46 +364,27 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
                 return {"ok": False, "error": "已终止"}
 
             if proc.poll() is not None:
-                # Process exited — drain any remaining lines from queue before proceeding
-                # (RESULT may already be in queue, not yet read by worker)
-                while True:
-                    try:
-                        line = out_queue.get(block=False)
-                        if line.startswith("RESULT:"):
-                            try:
-                                result = json.loads(line[7:])
-                                (output_dir / f"_transcribe_result_{proc.pid}.json").unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                    except queue.Empty:
-                        break
+                # 进程已退出：先从状态文件读 result（权威来源）
+                state = _read_transcribe_state(output_dir, episode_id)
+                if state and state.get("result"):
+                    result = state["result"]
+                else:
+                    # 兜底：从 stdout queue 读 RESULT:
+                    while True:
+                        try:
+                            line = out_queue.get(block=False)
+                            if line.startswith("RESULT:"):
+                                try:
+                                    result = json.loads(line[7:])
+                                except Exception:
+                                    pass
+                        except queue.Empty:
+                            break
                 break
 
-            try:
-                line = out_queue.get(block=True, timeout=0.5)
-            except queue.Empty:
-                continue
-
-            if line.startswith("STATUS:"):
-                try:
-                    msg = json.loads(line[7:])
-                    data = msg.get("data", "")
-                    m = re.search(r'\[(\d+)%\]', str(data))
-                    if m:
-                        pct = int(m.group(1))
-                        task_update(eid, status="transcribing", progress=pct, status_text=str(data))
-                        db.update_task_progress(episode_id, pct)
-                except Exception:
-                    pass
-            elif line.startswith("RESULT:"):
-                try:
-                    result = json.loads(line[7:])
-                    try:
-                        (output_dir / f"_transcribe_result_{proc.pid}.json").unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+            # 状态文件轮询（每轮询一次，约 1 秒）
+            _poll_transcribe_state(output_dir, episode_id, eid, last_progress)
+            time.sleep(1)
 
         elapsed = int(time.time() - start_ts)
         remaining = max(1, timeout - elapsed)

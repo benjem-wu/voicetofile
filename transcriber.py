@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -88,6 +89,44 @@ def write_progress(pid: int, output_dir: Path, pct: int):
         pass
 
 
+# --------------- 转写状态文件（权威状态来源）---------------
+
+def _write_state_file(state_file: Path, data: dict):
+    """
+    原子写入状态文件：先写临时文件再 rename，防止写坏。
+    """
+    try:
+        tmp = state_file.with_suffix(".tmp")
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+        tmp.replace(state_file)
+    except Exception:
+        pass
+
+
+def write_transcribe_state(output_dir: Path, episode_id: int,
+                            status: str, progress: int = 0,
+                            result: dict = None, error: str = "",
+                            status_text: str = ""):
+    """
+    写入转写状态文件 _transcribe_state_{episode_id}.json
+    """
+    data = {
+        "status": status,
+        "progress": progress,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if result is not None:
+        data["result"] = result
+    if error:
+        data["error"] = error
+    if status_text:
+        data["status_text"] = status_text
+
+    state_file = output_dir / f"_transcribe_state_{episode_id}.json"
+    _write_state_file(state_file, data)
+
+
 # --------------- 转写核心 ---------------
 
 def transcribe(
@@ -95,6 +134,7 @@ def transcribe(
     output_dir: str | Path,
     episode_name: str,
     episode_url: str = "",
+    episode_id: int = 0,
 ) -> dict:
     """
     主转写函数：音频重采样 → Whisper 转写 → 保存 TXT
@@ -104,6 +144,7 @@ def transcribe(
         output_dir: 输出目录
         episode_name: 集名（用于文件命名）
         episode_url: 集原始链接
+        episode_id: 集 ID（用于状态文件命名）
 
     Returns:
         {"ok": True, "file": "path/to/txt", "content": "全文"}
@@ -113,6 +154,7 @@ def transcribe(
     output_dir = Path(output_dir)
     pid = os.getpid()
     _total_start = time.time()
+    _episode_id = episode_id
 
     def _push(event, data=""):
         msg = json.dumps({"event": event, "data": data}, ensure_ascii=False)
@@ -121,7 +163,12 @@ def transcribe(
     def _write_progress(pct):
         write_progress(pid, output_dir, pct)
 
+    def _write_state(status: str, progress: int = 0, result: dict = None, error: str = "", status_text: str = ""):
+        if _episode_id:
+            write_transcribe_state(output_dir, _episode_id, status, progress, result, error, status_text)
+
     try:
+        _write_state("starting", 0)
         # ---- 设置环境变量 ----
         ffmpeg_dir = str(FFMPEG_PATH.parent)
         env_path = ffmpeg_dir + os.pathsep + CUDA_BIN + os.pathsep + os.environ.get("PATH", "")
@@ -146,6 +193,8 @@ def transcribe(
             total_dur = float(probe_result.stdout.strip() or 0)
         except Exception:
             total_dur = 0
+
+        _write_state("resampling", 1, status_text="[1%] 正在重采样为 16kHz WAV...")
 
         # ---- 音频重采样为 16kHz WAV ----
         if is_audio_file:
@@ -199,6 +248,8 @@ def transcribe(
             _push("status", f"[100%] 重采样完成 ({_extract_elapsed:.1f}秒)")
             _push("status", "─── 重采样完成 ✓ ───")
 
+        _write_state("model_loading", 15, status_text="[2%] 正在加载 Whisper large-v3 模型...")
+
         # ---- 加载 Whisper 模型 ----
         global _whisper_model_cache
         _push("status", f"[2%] 正在加载 Whisper {WHISPER_MODEL} 模型...")
@@ -211,6 +262,7 @@ def transcribe(
                         WHISPER_MODEL, device="cuda", compute_type=compute_type
                     )
                     _push("status", f"[2%] 模型加载成功（compute_type={compute_type}）")
+                    _write_state("transcribing", 5, status_text=f"[5%] 模型加载完成，开始识别...")
                     break
                 except Exception as e:
                     if compute_type == "int8":
@@ -272,6 +324,7 @@ def transcribe(
                     status_text += f" ({eta_str})"
                 _push("status", status_text)
                 _write_progress(5 + pct * 0.9)
+                _write_state("transcribing", int(5 + pct * 0.9), status_text=status_text)
                 last_push_time = now
 
         _write_progress(100)
@@ -328,11 +381,14 @@ def transcribe(
         except Exception:
             pass
 
+        _write_state("done", 100, result={"ok": True, "file": str(txt_file), "content": full_content},
+                     status_text="[100%] 转写完成，文字稿已保存")
         return {"ok": True, "file": str(txt_file), "content": full_content}
 
     except Exception as e:
         import traceback
         traceback.print_exc()
+        _write_state("failed", error=str(e), status_text=f"[失败] 转写异常: {str(e)[:50]}")
         return {"ok": False, "error": str(e)}
 
 
@@ -365,8 +421,9 @@ if __name__ == "__main__":
         output_dir = Path(sys.argv[2])
         episode_name = sys.argv[3] if len(sys.argv) > 3 else "unknown"
         episode_url = sys.argv[4] if len(sys.argv) > 4 else ""
+        episode_id = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
-        result = transcribe(audio_file, output_dir, episode_name, episode_url)
+        result = transcribe(audio_file, output_dir, episode_name, episode_url, episode_id)
 
         result_file = output_dir / f"_transcribe_result_{os.getpid()}.json"
         with open(result_file, 'w', encoding='utf-8') as f:
