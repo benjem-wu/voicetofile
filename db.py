@@ -3,6 +3,7 @@ SQLite 数据库模块
 VoicToFile — 小宇宙播客转文字
 """
 import os
+import re
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -73,6 +74,11 @@ def init_db():
             cur.execute("ALTER TABLE episodes ADD COLUMN audio_path TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # 列已存在
+        # 兼容已有数据库：discarded 列可能不存在（废弃标记，保留最长版）
+        try:
+            cur.execute("ALTER TABLE episodes ADD COLUMN discarded INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
 
         # 索引加速查询
         cur.execute("""
@@ -82,6 +88,20 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_episodes_status
             ON episodes(status)
+        """)
+
+        # podcast_details 表（播客元数据，与 podcasts 一对一）
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS podcast_details (
+                podcast_id INTEGER PRIMARY KEY,
+                author TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                cover_url TEXT DEFAULT '',
+                subscriber_count INTEGER DEFAULT 0,
+                episode_count INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE
+            )
         """)
 
         conn.commit()
@@ -114,6 +134,51 @@ def add_podcast(pid: str, name: str) -> int:
         cur.execute("SELECT id FROM podcasts WHERE pid = ?", (pid,))
         row = cur.fetchone()
         return row["id"]
+    finally:
+        conn.close()
+
+
+def upsert_podcast_details(
+    podcast_id: int,
+    author: str = "",
+    description: str = "",
+    cover_url: str = "",
+    subscriber_count: int = 0,
+    episode_count: int = 0,
+):
+    """
+    插入或更新播客详情。
+    podcast_details 与 podcasts 是 1:1 关系，主键 podcast_id。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        now = datetime.now().isoformat()
+        cur.execute("""
+            INSERT INTO podcast_details
+                (podcast_id, author, description, cover_url, subscriber_count, episode_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(podcast_id) DO UPDATE SET
+                author = excluded.author,
+                description = excluded.description,
+                cover_url = excluded.cover_url,
+                subscriber_count = excluded.subscriber_count,
+                episode_count = excluded.episode_count,
+                updated_at = excluded.updated_at
+        """, (podcast_id, author, description, cover_url, subscriber_count, episode_count, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_podcast_details(podcast_id: int) -> Optional[dict]:
+    """获取播客详情，不存在则返回 None"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM podcast_details WHERE podcast_id = ?", (podcast_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 
@@ -155,19 +220,30 @@ def delete_podcast(podcast_id: int):
 # --------------- Episodes ---------------
 
 def _is_placeholder(name: str, duration: str) -> bool:
-    """判断是否为无音频的占位集（如'声动早咖啡'、'资讯早7点'等预告类标题）"""
+    """
+    判断是否为无音频的占位集
+    - 空名称
+    - 很短（7字符以下）
+    - 格式 "短名 | 短名" 的分类标题（如"半拿铁 | 商业沉浮录"）
+    """
     if not name:
         return True
-    # 名称很短（7字符以下）的通常是占位符
     if len(name) < 7:
         return True
+    # "xxx | xxx" 格式通常是播客内部分类标题，不是真实集
+    if " | " in name:
+        parts = name.split(" | ")
+        if all(len(p.strip()) < 8 for p in parts):
+            return True
     return False
 
 
 def add_episodes(episodes: list[dict], source: str = "subscribe"):
     """
     批量添加 episodes（已存在于 DB 则忽略）
-    过滤掉占位集（名称很短、无音频的条目）
+    过滤逻辑：满足以下条件之一即可入库
+      - 条件A：有 audio_url（非空字符串）
+      - 条件B：非占位集（name >= 7 字，且含有效标题）
     episodes 格式：[{
         "podcast_id": int,
         "eid": str,
@@ -175,11 +251,15 @@ def add_episodes(episodes: list[dict], source: str = "subscribe"):
         "pub_date": str,
         "duration": str,
         "is_paid": bool,
+        "audio_url": str,   # 可选，有则用条件A
     }]
     source: 'subscribe'（订阅列表）或 'manual'（手动添加）
     """
-    # 过滤占位集
-    valid = [ep for ep in episodes if not _is_placeholder(ep.get("name", ""), ep.get("duration", ""))]
+    # 过滤占位集：必须有 audio_url 或名称符合有效集标准
+    valid = [
+        ep for ep in episodes
+        if ep.get("audio_url") or not _is_placeholder(ep.get("name", ""), ep.get("duration", ""))
+    ]
 
     conn = get_conn()
     try:
@@ -241,14 +321,52 @@ def get_episode_by_eid(podcast_id: int, eid: str) -> Optional[dict]:
         conn.close()
 
 
+def _parse_duration_to_minutes(duration: str) -> int:
+    """将 ISO 8601  duration (PT28M) 转为分钟整数，无法解析返回 0"""
+    if not duration:
+        return 0
+    m = re.search(r'(\d+)M', duration)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+def get_episode_by_name(podcast_id: int, name: str) -> Optional[dict]:
+    """根据 podcast_id + name 查找未废弃的 episode"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM episodes WHERE podcast_id = ? AND name = ? AND discarded = 0",
+            (podcast_id, name)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def mark_episode_discarded(episode_id: int):
+    """标记 episode 为废弃（不展示，但保留记录）"""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE episodes SET discarded = 1, updated_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), episode_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def list_episodes_by_podcast(podcast_id: int) -> list[dict]:
-    """列出某播客的所有 episodes，按发布日期倒序"""
+    """列出某播客的所有 episodes（排除已废弃），按发布日期倒序"""
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute("""
             SELECT * FROM episodes
-            WHERE podcast_id = ?
+            WHERE podcast_id = ? AND discarded = 0
             ORDER BY pub_date DESC
         """, (podcast_id,))
         return [dict(row) for row in cur.fetchall()]
@@ -293,6 +411,37 @@ def pause_episode(episode_id: int, audio_path: str = ""):
             WHERE id = ?
         """, (audio_path, datetime.now().isoformat(), episode_id))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def update_episode_duration(episode_id: int, duration: str):
+    """更新 episode 的 duration（用于补全或刷新时长数据）"""
+    if not duration:
+        return
+    conn = get_conn()
+    try:
+        conn.execute("""
+            UPDATE episodes
+            SET duration = ?, updated_at = ?
+            WHERE id = ?
+        """, (duration, datetime.now().isoformat(), episode_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_episodes_missing_duration(podcast_id: int) -> list[dict]:
+    """返回某播客在 DB 中 duration 为空的 episodes"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, eid, name, duration FROM episodes
+            WHERE podcast_id = ? AND (duration IS NULL OR duration = '')
+            ORDER BY pub_date DESC
+        """, (podcast_id,))
+        return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
 

@@ -77,6 +77,11 @@ class EpisodeInfo:
 class PodcastInfo:
     pid: str
     name: str
+    author: str = ""
+    description: str = ""
+    cover_url: str = ""
+    subscriber_count: int = 0
+    episode_count: int = 0
     episodes: list = field(default_factory=list)
 
 
@@ -219,6 +224,38 @@ def _extract_podcast_name(html: str) -> str:
     return ""
 
 
+def _extract_podcast_metadata(html: str) -> dict:
+    """
+    从 __NEXT_DATA__ 提取播客元数据。
+    返回 dict：author, description, cover_url, subscriber_count, episode_count
+    """
+    result = {
+        "author": "",
+        "description": "",
+        "cover_url": "",
+        "subscriber_count": 0,
+        "episode_count": 0,
+    }
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if not m:
+        return result
+    try:
+        data = json.loads(m.group(1).strip())
+        podcast = data.get("props", {}).get("pageProps", {}).get("podcast", {})
+        result["author"] = podcast.get("author", "") or ""
+        result["description"] = podcast.get("description", "") or ""
+        image = podcast.get("image")
+        if isinstance(image, dict):
+            result["cover_url"] = image.get("picUrl", "") or ""
+        elif isinstance(image, str):
+            result["cover_url"] = image
+        result["subscriber_count"] = int(podcast.get("subscriptionCount", 0) or 0)
+        result["episode_count"] = int(podcast.get("episodeCount", 0) or 0)
+    except Exception:
+        pass
+    return result
+
+
 # --------------- Scraper ---------------
 
 class Scraper:
@@ -306,16 +343,26 @@ class Scraper:
             return self._playwright_get(url)
 
     def fetch_podcast_info(self, pid: str) -> PodcastInfo:
-        """获取播客名称 + 15 集 episode 列表"""
+        """获取播客名称 + 15 集 episode 列表 + 元数据（作者/订阅数/封面等）"""
         url = PODCAST_PAGE_URL.format(pid=pid)
         logger.info(f"获取播客页面: {url}")
         html = self.get_with_fallback(url)
 
         name = _extract_podcast_name(html) or f"播客_{pid}"
+        meta = _extract_podcast_metadata(html)
         episodes = _extract_episodes_from_html(html)
         logger.info(f"获取到 {len(episodes)} 集")
 
-        return PodcastInfo(pid=pid, name=name, episodes=episodes)
+        return PodcastInfo(
+            pid=pid,
+            name=name,
+            author=meta["author"],
+            description=meta["description"],
+            cover_url=meta["cover_url"],
+            subscriber_count=meta["subscriber_count"],
+            episode_count=meta["episode_count"],
+            episodes=episodes,
+        )
 
     def fetch_episode_detail(self, eid: str, share_token: str = "") -> EpisodeInfo:
         """获取单集音频 URL"""

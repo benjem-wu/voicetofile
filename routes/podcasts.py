@@ -44,7 +44,7 @@ def api_fetch_podcast():
                 "eid": ep.eid,
                 "name": ep.name,
                 "pub_date": ep.pub_date,
-                "duration": ep.duration,
+                "duration": detail.duration,
                 "is_paid": ep.is_paid,
                 "paid_price": getattr(ep, "paid_price", None),
                 "description": getattr(ep, "description", ""),
@@ -63,6 +63,17 @@ def api_fetch_podcast():
             addLog(f"[播客] 跳过 {skipped} 集（无音频，占位集）", "done")
 
         podcast_id = db.add_podcast(pid, info.name)
+
+        # 存储播客详情（作者/订阅数/封面/简介）
+        if info.author or info.subscriber_count:
+            db.upsert_podcast_details(
+                podcast_id=podcast_id,
+                author=info.author,
+                description=info.description,
+                cover_url=info.cover_url,
+                subscriber_count=info.subscriber_count,
+                episode_count=info.episode_count,
+            )
 
         ep_records = [{
             "podcast_id": podcast_id,

@@ -341,6 +341,49 @@ def _start_task_thread(task: dict):
     t.join()
 
 
+# --------------- Worker 线程管理（供 api_queue_stop 等待终止完成）---------------
+
+_current_worker_thread = None
+
+
+def _start_task_thread(task: dict):
+    """启动任务处理线程"""
+    global _current_worker_thread
+    t = threading.Thread(target=_process_task, args=(task,), daemon=True)
+    _current_worker_thread = t
+    t.start()
+    t.join()
+    _current_worker_thread = None
+
+
+def wait_for_worker_exit():
+    """等待当前任务处理线程退出（供 api_queue_stop 调用）"""
+    global _current_worker_thread
+    if _current_worker_thread and _current_worker_thread.is_alive():
+        _current_worker_thread.join(timeout=60)
+
+
+def terminate_subprocess():
+    """杀掉转写子进程（供 api_queue_stop 调用）"""
+    global _proc_to_kill
+    if _proc_to_kill is not None:
+        try:
+            _proc_to_kill.kill()
+            _proc_to_kill.wait()
+        except Exception:
+            pass
+        _proc_to_kill = None
+
+
+def reset_termination_state():
+    """重置终止状态（供 api_queue_stop 在等待完成后调用）"""
+    global _task_terminated, _current_task_info, _current_audio_file, _current_output_dir
+    _task_terminated = False
+    _current_task_info = None
+    _current_audio_file = None
+    _current_output_dir = None
+
+
 # --------------- 对外暴露的 worker 控制函数（供 routes 调用）---------------
 
 def get_current_task_info():

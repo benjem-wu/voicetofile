@@ -353,7 +353,7 @@ async function downloadAllUndone() {
     const resp = await fetch('/api/episodes/enqueue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ podcast_id: PODCAST_ID, eids: undone.map(e => e.eid) })
+      body: JSON.stringify({ episode_ids: undone.map(e => e.id) })
     });
     const data = await resp.json();
     if (data.ok) {

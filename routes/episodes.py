@@ -141,6 +141,44 @@ def api_refresh_episodes():
             db.add_podcast(pid, info.name)
             updated_name = info.name
 
+        # 同步播客详情（作者/订阅数/封面/简介）
+        if info.author or info.subscriber_count:
+            db.upsert_podcast_details(
+                podcast_id=podcast_id,
+                author=info.author,
+                description=info.description,
+                cover_url=info.cover_url,
+                subscriber_count=info.subscriber_count,
+                episode_count=info.episode_count,
+            )
+
+        # 并行验证音频 URL 并获取真实时长（与 fetch_one_audio 逻辑一致）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def fetch_one_audio(ep):
+            detail = scraper.fetch_episode_info(ep.eid, interval=1)
+            return {
+                "eid": ep.eid,
+                "name": ep.name,
+                "pub_date": ep.pub_date,
+                "duration": detail.duration,
+                "is_paid": ep.is_paid,
+                "paid_price": getattr(ep, "paid_price", None),
+                "description": getattr(ep, "description", ""),
+                "has_audio": bool(detail.audio_url),
+            }
+
+        episodes_with_audio = []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(fetch_one_audio, ep): ep for ep in info.episodes}
+            for future in as_completed(futures):
+                episodes_with_audio.append(future.result())
+
+        valid_episodes = [ep for ep in episodes_with_audio if ep["has_audio"]]
+        skipped = len(info.episodes) - len(valid_episodes)
+        if skipped > 0:
+            addLog(f"[刷新] 跳过 {skipped} 集（无音频，占位集）", "done")
+
         # 刷新前记录 DB 中已有的 eid
         conn = db.get_conn()
         existing_eids = set(
@@ -149,17 +187,43 @@ def api_refresh_episodes():
             ).fetchall()
         )
 
-        ep_records = [{
-            "podcast_id": podcast_id,
-            "eid": ep.eid,
-            "name": ep.name,
-            "pub_date": ep.pub_date,
-            "duration": ep.duration,
-            "is_paid": ep.is_paid,
-        } for ep in info.episodes]
+        # 入库前去重：同名 episode 比时长，保留最长版，标记短版为 discarded
+        ep_records = []
+        for ep in valid_episodes:
+            # eid 已存在 → INSERT OR IGNORE 会跳过
+            # eid 不存在时，检查是否有同名 episode
+            existing_same_name = db.get_episode_by_name(podcast_id, ep["name"])
+            if existing_same_name:
+                existing_dur = db._parse_duration_to_minutes(existing_same_name.get("duration") or "")
+                new_dur = db._parse_duration_to_minutes(ep.get("duration") or "")
+                if new_dur <= existing_dur:
+                    # 新的不比旧的长 → 跳过，不入库
+                    continue
+                else:
+                    # 新的更长 → 标记旧为废弃，继续入库新记录
+                    db.mark_episode_discarded(existing_same_name["id"])
+
+            ep_records.append({
+                "podcast_id": podcast_id,
+                "eid": ep["eid"],
+                "name": ep["name"],
+                "pub_date": ep["pub_date"],
+                "duration": ep["duration"],
+                "is_paid": ep["is_paid"],
+            })
+
         db.add_episodes(ep_records)
 
-        new_eids = [ep.eid for ep in info.episodes if ep.eid not in existing_eids]
+        # 更新已有记录的时长（INSERT OR IGNORE 不更新现有记录）
+        for ep in valid_episodes:
+            if ep["eid"] in existing_eids and ep["duration"]:
+                conn.execute(
+                    "UPDATE episodes SET duration = ? WHERE podcast_id = ? AND eid = ? AND duration != ?",
+                    (ep["duration"], podcast_id, ep["eid"], ep["duration"])
+                )
+        conn.commit()
+
+        new_eids = [ep["eid"] for ep in valid_episodes if ep["eid"] not in existing_eids]
         new_count = len(new_eids)
 
         addLog(f"[刷新] 完成，共 {len(info.episodes)} 集，新增 {new_count} 集", "done")

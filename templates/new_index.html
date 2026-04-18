@@ -1249,13 +1249,12 @@ async function downloadAllUndone() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        podcast_id: detailPodcastId,
-        eids: undone.map(e => e.eid)
+        episode_ids: undone.map(e => e.id)
       })
     });
     const data = await resp.json();
     if (data.ok) {
-      toast(`已加入 ${data.count} 集到队列`, 'success');
+      toast(`已加入 ${data.added} 集到队列`, 'success');
       loadQueue();
     } else {
       toast('加入队列失败: ' + (data.error || '未知错误'), 'error');
