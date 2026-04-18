@@ -240,13 +240,46 @@ def update_settings():
 # --------------- 启动 ---------------
 
 if __name__ == "__main__":
-    # 初始化数据库
+    # ---- 日志文件配置 ----
+    LOG_FILE = Path(__file__).parent / "voicetofile.log"
+
+    # 创建一个 Tee：同时写文件 + stdout
+    class TeeWriter:
+        def __init__(self, file, stdout):
+            self.file = file
+            self.stdout = stdout
+        def write(self, msg):
+            if msg.strip():
+                self.file.write(msg)
+                self.file.flush()
+            try:
+                self.stdout.write(msg)
+                self.stdout.flush()
+            except UnicodeEncodeError:
+                # Windows 终端可能是 GBK，无法编码非 ASCII 字符
+                try:
+                    self.stdout.buffer.write(msg.encode(self.stdout.encoding or "utf-8", errors="replace"))
+                    self.stdout.buffer.flush()
+                except Exception:
+                    pass
+        def flush(self):
+            self.file.flush()
+            try:
+                self.stdout.flush()
+            except Exception:
+                pass
+
+    log_fd = open(LOG_FILE, "a", encoding="utf-8")
+    sys.stdout = TeeWriter(log_fd, sys.__stdout__)
+    sys.stderr = TeeWriter(log_fd, sys.__stderr__)
+
+    # ---- 初始化数据库 ----
     db.init_db()
 
     # 清理残留任务
     deleted = db.cleanup_stale_tasks()
     if deleted > 0:
-        print(f"[队列] 已删除 {deleted} 个残留任务")
+        logging.info(f"[队列] 已删除 {deleted} 个残留任务")
 
     # 单实例保护
     if not _acquire_lock():

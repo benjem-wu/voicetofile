@@ -79,6 +79,11 @@ def init_db():
             cur.execute("ALTER TABLE episodes ADD COLUMN discarded INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # 列已存在
+        # 兼容已有数据库：retry_count 列可能不存在（入队重试次数，超 2 次标记 failed）
+        try:
+            cur.execute("ALTER TABLE episodes ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
 
         # 索引加速查询
         cur.execute("""
@@ -665,7 +670,7 @@ def get_next_queued_task() -> Optional[dict]:
                 ORDER BY created_at ASC
                 LIMIT 1
             )
-            RETURNING id, eid, name, podcast_id, status
+            RETURNING id, eid, name, podcast_id, status, retry_count
         """, (datetime.now().isoformat(),))
         row = cur.fetchone()
         conn.commit()
@@ -684,17 +689,36 @@ def get_next_queued_task() -> Optional[dict]:
 def enqueue_task(episode_id: int) -> bool:
     """
     将 pending/failed 状态改为 queued（入队）。
+    同时重置 retry_count = 0（用户主动入队 = 新尝试）。
     返回 True 表示入队成功，False 表示状态不允许（如已在队列中）。
     """
     conn = get_conn()
     try:
         cur = conn.execute("""
             UPDATE episodes
-            SET status = 'queued', updated_at = ?
+            SET status = 'queued', retry_count = 0, updated_at = ?
             WHERE id = ? AND status IN ('pending', 'failed')
         """, (datetime.now().isoformat(), episode_id))
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def increment_retry_count(episode_id: int) -> int:
+    """
+    将 episode 的 retry_count 加 1，返回新的计数。
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            UPDATE episodes SET retry_count = retry_count + 1, updated_at = ?
+            WHERE id = ?
+        """, (datetime.now().isoformat(), episode_id))
+        conn.commit()
+        cur2 = conn.execute("SELECT retry_count FROM episodes WHERE id = ?", (episode_id,))
+        row = cur2.fetchone()
+        return row["retry_count"] if row else 0
     finally:
         conn.close()
 

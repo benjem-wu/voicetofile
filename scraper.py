@@ -36,14 +36,27 @@ USER_AGENTS = [
 
 # --------------- 付费检测 ---------------
 
-PAID_RE = re.compile(
-    r"(?:单集)?售价?(\d+\.?\d*)\s*元|优惠价(\d+\.?\d*)\s*元|购买|付费|小鹅通|已付费|已购买",
+PAID_PRICE_RE = re.compile(
+    r"(?:单集)?售价?(\d+\.?\d*)\s*元|优惠价(\d+\.?\d*)\s*元",
+    re.UNICODE,
+)
+# 这些词出现在 description 中时通常意味着付费（但需配合价格或单独出现）
+PAID_EXPLICIT_RE = re.compile(
+    r"购买|小鹅通|已付费|已购买",
     re.UNICODE,
 )
 
 
 def is_paid_episode(description: str) -> bool:
-    return bool(description) and bool(PAID_RE.search(description))
+    if not description:
+        return False
+    # 有具体价格 → 付费
+    if PAID_PRICE_RE.search(description):
+        return True
+    # 有明确购买词且 description 较短（不太像节目介绍）→ 付费
+    if PAID_EXPLICIT_RE.search(description) and len(description) < 200:
+        return True
+    return False
 
 
 def extract_paid_price(description: str) -> Optional[str]:

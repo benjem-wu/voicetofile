@@ -95,16 +95,44 @@ def _process_task(task: dict):
     output_dir = get_output_dir(podcast_name)
     start_time = time.time()
 
+    # ---- 无效 eid 快速过滤（防止脏数据进入网络请求）----
+    if not eid or eid.startswith("test_") or len(eid) < 10:
+        addLog(f"[脏数据] episode_id={episode_id} eid={eid!r} 无效，跳过", "err")
+        db.mark_task_failed(episode_id, f"无效eid: {eid}")
+        return
+
     _current_task_info = task
     _current_output_dir = output_dir
     audio_file = None
 
     task_update(eid, status="downloading", progress=0, elapsed=0)
 
+    # ---- fetch_episode_info 总超时保护（防止网络卡死导致任务永远卡住）----
+    _fetch_done = False
+    _fetch_result = [None]  # [0] = (ep_detail or exception)
+    def _fetch_target():
+        global _fetch_done
+        try:
+            _fetch_result[0] = scraper.fetch_episode_info(eid, interval=config.COOKIE_INTERVAL)
+        except Exception as ex:
+            _fetch_result[0] = ex
+        finally:
+            _fetch_done = True
+
+    fetch_thread = threading.Thread(target=_fetch_target, daemon=True)
+    fetch_thread.start()
+    fetch_thread.join(timeout=90)  # 最多等 90 秒
+    if _fetch_result[0] is None:
+        # 超时了，fetch_thread 还在跑，但我们已经不等了
+        raise ValueError(f"获取音频 URL 超时（90秒），网络可能有问题")
+    if isinstance(_fetch_result[0], Exception):
+        raise _fetch_result[0]
+    ep_detail = _fetch_result[0]
+
     try:
         # ---- 获取音频 URL ----
         addLog(f"[下载] {episode_name[:30]}...", "tag")
-        ep_detail = scraper.fetch_episode_info(eid, interval=config.COOKIE_INTERVAL)
+        print(f"[DEBUG] fetch_episode_info OK: audio_url={bool(ep_detail.audio_url)}", flush=True)
         if not ep_detail.audio_url:
             raise ValueError("无法获取音频 URL")
         if ep_detail.is_paid:
@@ -173,18 +201,23 @@ def _process_task(task: dict):
         total_elapsed = time.time() - start_time
         err_msg = str(e)
         addLog(f"[失败] {episode_name[:30]}: {err_msg}", "err")
+        print(f"[DEBUG] _process_task exception: {err_msg}", flush=True)
 
-        retry_count = task.get("retry_count", 0)
-        if retry_count < 2 and not _task_terminated:
-            db.enqueue_task(episode_id)
-            addLog(f"[重试] {episode_name[:30]} 第{retry_count+1}次", "tag")
+        if _task_terminated:
+            print(f"[DEBUG] _task_terminated=True, returning without retry", flush=True)
+            return
+
+        # 先加 retry_count，再决定是否重试（持久化到 DB，防止无限重试）
+        retry_count = db.increment_retry_count(episode_id)
+        print(f"[DEBUG] retry_count={retry_count}, threshold=2, will_retry={retry_count <= 2}", flush=True)
+        if retry_count <= 2:
+            # 重试：改回 queued，worker loop 下一次 poll 会重新拾取
+            db.update_episode_status(episode_id, "queued", txt_path="", error_msg="")
+            addLog(f"[重试] {episode_name[:30]} 第{retry_count}次", "tag")
             broadcast_sse("task_done", {
                 "eid": eid, "name": episode_name,
                 "podcast_name": podcast_name, "status": "queued"
             })
-            return
-
-        if _task_terminated:
             return
 
         db.mark_task_failed(episode_id, err_msg)
@@ -257,7 +290,7 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
     )
     _transcribe_proc = proc
 
-    out_queue: queue.Queue = queue.Queue(maxsize=100)
+    out_queue: queue.Queue = queue.Queue(maxsize=0)  # 无界队列，避免有界队列填满死锁
 
     def _drain_stdout():
         try:
@@ -286,6 +319,19 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
                 return {"ok": False, "error": "已终止"}
 
             if proc.poll() is not None:
+                # Process exited — drain any remaining lines from queue before proceeding
+                # (RESULT may already be in queue, not yet read by worker)
+                while True:
+                    try:
+                        line = out_queue.get(block=False)
+                        if line.startswith("RESULT:"):
+                            try:
+                                result = json.loads(line[7:])
+                                (output_dir / f"_transcribe_result_{proc.pid}.json").unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                    except queue.Empty:
+                        break
                 break
 
             try:
