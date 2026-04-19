@@ -76,8 +76,79 @@
 </div>
 
 <script>
-// ---- SSE 实时更新 ----
-const evtSource = new EventSource('/sse/stream');
+// ---- SSE 实时更新（带自动重连）----
+let evtSource = null;
+let sseReconnectDelay = 1000;
+const MAX_RECONNECT_DELAY = 30000;
+
+function setupEventSource() {
+  if (evtSource) {
+    evtSource.close();
+  }
+  evtSource = new EventSource('/sse/stream');
+
+  evtSource.onopen = () => {
+    sseReconnectDelay = 1000; // 重置重连延迟
+  };
+
+  evtSource.onerror = () => {
+    evtSource.close();
+    setTimeout(setupEventSource, sseReconnectDelay);
+    sseReconnectDelay = Math.min(sseReconnectDelay * 2, MAX_RECONNECT_DELAY);
+  };
+
+  // task_update：实时进度变化
+  evtSource.addEventListener('task_update', (e) => {
+    if (!window._cachedTasks) return;
+    const task = JSON.parse(e.data);
+    const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
+    if (idx < 0) {
+      // 任务不在缓存（可能 SSE 事件先于 loadQueue 到达），立即拉取最新状态
+      loadQueue();
+      return;
+    }
+    const cached = window._cachedTasks[idx];
+    const isTerminal = cached.status === 'done_deleted' || cached.status === 'failed';
+    if (isTerminal) return;
+    window._cachedTasks[idx] = { ...cached, ...task };
+    updateQueueUI(window._cachedTasks);
+  });
+
+  // task_new：新任务入队
+  evtSource.addEventListener('task_new', (e) => {
+    if (!window._cachedTasks) window._cachedTasks = [];
+    const task = JSON.parse(e.data);
+    if (!window._cachedTasks.find(t => t.eid === task.eid)) {
+      window._cachedTasks.push(task);
+      updateQueueUI(window._cachedTasks);
+    }
+  });
+
+  // task_done：任务完成（下载/转写/失败）
+  evtSource.addEventListener('task_done', (e) => {
+    if (!window._cachedTasks) return;
+    const task = JSON.parse(e.data);
+    const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
+    if (idx >= 0) {
+      window._cachedTasks[idx] = { ...window._cachedTasks[idx], status: task.status || 'done_deleted' };
+    } else {
+      window._cachedTasks.push({ eid: task.eid, name: task.name, podcast_name: task.podcast_name, status: task.status || 'done_deleted' });
+    }
+    updateQueueUI(window._cachedTasks);
+  });
+
+  // task_stopped：任务被终止
+  evtSource.addEventListener('task_stopped', (e) => {
+    const { episode_id } = JSON.parse(e.data);
+    if (window._cachedTasks && episode_id) {
+      window._cachedTasks = window._cachedTasks.filter(t => t.id !== episode_id);
+      updateQueueUI(window._cachedTasks);
+    }
+    loadQueue();
+  });
+}
+
+setupEventSource();
 
 function formatElapsed(seconds) {
   if (!seconds) return '0秒';
@@ -163,50 +234,24 @@ async function loadQueue() {
   try {
     const resp = await fetch('/api/queue');
     const data = await resp.json();
-    // 直接用 API 数据替换缓存（API 是 DB 真实状态的唯一权威来源）
-    window._cachedTasks = data.tasks || [];
+    const tasks = data.tasks || [];
+    if (!window._cachedTasks) {
+      // 首次加载：直接初始化缓存
+      window._cachedTasks = tasks;
+    } else {
+      // 增量合并：只补充新任务，不覆盖已有任务状态（SSE 实时更新优先）
+      const cacheEids = new Set(window._cachedTasks.map(t => t.eid));
+      for (const t of tasks) {
+        if (!cacheEids.has(t.eid)) {
+          window._cachedTasks.push(t);
+        }
+      }
+    }
     updateQueueUI(window._cachedTasks);
   } catch (e) {
     console.error('加载队列失败:', e);
   }
 }
-
-// SSE 任务更新事件：只更新已有任务，不在此创建（创建由 task_new 和 loadQueue 负责）
-evtSource.addEventListener('task_update', (e) => {
-  if (!window._cachedTasks) return;
-  const task = JSON.parse(e.data);
-  const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
-  if (idx < 0) return; // task_update 不能创建任务，忽略；loadQueue 会补充
-  const cached = window._cachedTasks[idx];
-  const isTerminal = cached.status === 'done_deleted' || cached.status === 'failed';
-  if (isTerminal) return; // 终态不受任何覆盖
-  window._cachedTasks[idx] = { ...cached, ...task };
-  updateQueueUI(window._cachedTasks);
-});
-
-evtSource.addEventListener('task_new', (e) => {
-  // 即使 cache 未初始化也要处理（防止 loadQueue 前到达的 task_new 被丢弃）
-  if (!window._cachedTasks) window._cachedTasks = [];
-  const task = JSON.parse(e.data);
-  if (!window._cachedTasks.find(t => t.eid === task.eid)) {
-    window._cachedTasks.push(task);
-    updateQueueUI(window._cachedTasks);
-  }
-});
-
-evtSource.addEventListener('task_done', (e) => {
-  if (!window._cachedTasks) return;
-  const task = JSON.parse(e.data);
-  // 只更新任务状态，不要删除（保留在已完成列表里）
-  const idx = window._cachedTasks.findIndex(t => t.eid === task.eid);
-  if (idx >= 0) {
-    window._cachedTasks[idx] = { ...window._cachedTasks[idx], status: 'done_deleted' };
-  } else {
-    // 不在缓存里就加进来（处理初始化前已结束的任务）
-    window._cachedTasks.push({ eid: task.eid, name: task.name, podcast_name: task.podcast_name, status: 'done_deleted' });
-  }
-  updateQueueUI(window._cachedTasks);
-});
 
 // 初始化时加载一次
 loadQueue();
@@ -227,16 +272,6 @@ async function stopCurrentTask() {
     btn.textContent = '终止任务';
   }
 }
-
-// task_stopped 事件：立即从缓存中移除终止的任务，不需要等下次 loadQueue 轮询
-evtSource.addEventListener('task_stopped', (e) => {
-  const { episode_id } = JSON.parse(e.data);
-  if (window._cachedTasks && episode_id) {
-    window._cachedTasks = window._cachedTasks.filter(t => t.id !== episode_id);
-    updateQueueUI(window._cachedTasks);
-  }
-  loadQueue();
-});
 </script>
 </body>
 </html>

@@ -165,6 +165,7 @@ def _process_task(task: dict):
         addLog(f"[转写] {episode_name[:30]}...", "tag")
         task_update(eid, status="transcribing", progress=50)
         db.update_task_progress(episode_id, 50)
+        db.update_episode_status(episode_id, "transcribing")
 
         sub_result = _run_transcriber_subprocess(
             audio_file, output_dir, episode_name,

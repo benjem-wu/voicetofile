@@ -216,6 +216,7 @@ def delete_podcast(podcast_id: int):
     conn = get_conn()
     try:
         cur = conn.cursor()
+        cur.execute("DELETE FROM episodes WHERE podcast_id = ?", (podcast_id,))
         cur.execute("DELETE FROM podcasts WHERE id = ?", (podcast_id,))
         conn.commit()
     finally:

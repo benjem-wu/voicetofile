@@ -1322,11 +1322,15 @@ function updateTicker(tasks) {
     let statusLabel = current.status === 'downloading' ? '音频下载中'
       : current.status === 'transcribing' ? '音频转文字中'
       : '排队中';
+    // 过滤掉 status_text 中的 [N%] 前缀（避免和 pct% 重复），保留剩余描述
+    const rawText = current.status_text || '';
+    const descText = rawText.replace(/^\[\d+%]\s*/, '').replace(/\s*\[\d+%].*$/, '');
     tickerItems.innerHTML = `
       <span class="ticker-item">
         <span class="name">${escapeHtml(current.podcast_name)}</span> — ${escapeHtml(current.name)}
         ${pct > 0 ? `<span class="status">${pct}%</span>` : ''}
         <span class="status">[${statusLabel}]</span>
+        ${descText ? `<span class="status">${escapeHtml(descText)}</span>` : ''}
       </span>`;
     return;
   }
@@ -1783,7 +1787,11 @@ function closeErrorDialog() {
 
 async function refreshPodcast(podcastId) {
   const btn = document.querySelector(`button[onclick*="refreshPodcast(${podcastId})"]`);
-  if (btn) { btn.disabled = true; }
+  if (!btn) return;
+  const orig = btn.textContent.trim();
+  btn.disabled = true;
+  btn.textContent = '刷新中...';
+  btn.style.cursor = 'not-allowed';
   try {
     const resp = await fetch('/api/episodes/refresh', {
       method: 'POST',
@@ -1792,7 +1800,7 @@ async function refreshPodcast(podcastId) {
     });
     const data = await resp.json();
     if (data.ok) {
-      toast(`已刷新 "${data.podcast_name}"`, 'success');
+      toast(`已刷新 "${data.podcast_name}"，新增 ${data.new_count} 集`, 'success');
       // 根据 DB 中的 is_new 标记更新红点
       const newIdsResp = await fetch('/api/podcasts/new-ids');
       const newIdsData = await newIdsResp.json();
@@ -1809,7 +1817,11 @@ async function refreshPodcast(podcastId) {
   } catch (e) {
     toast('刷新失败', 'error');
   } finally {
-    if (btn) { btn.disabled = false; }
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = orig;
+      btn.style.cursor = '';
+    }
   }
 }
 

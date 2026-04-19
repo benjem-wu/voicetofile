@@ -187,22 +187,10 @@ def api_refresh_episodes():
             ).fetchall()
         )
 
-        # 入库前去重：同名 episode 比时长，保留最长版，标记短版为 discarded
+        # 入库前去重：只按 eid 精确去重（不同 eid 即使同名也入库）
+        # 小宇宙同一标题可能有多集（不同日期/不同录音），不再是废弃关系
         ep_records = []
         for ep in valid_episodes:
-            # eid 已存在 → INSERT OR IGNORE 会跳过
-            # eid 不存在时，检查是否有同名 episode
-            existing_same_name = db.get_episode_by_name(podcast_id, ep["name"])
-            if existing_same_name:
-                existing_dur = db._parse_duration_to_minutes(existing_same_name.get("duration") or "")
-                new_dur = db._parse_duration_to_minutes(ep.get("duration") or "")
-                if new_dur <= existing_dur:
-                    # 新的不比旧的长 → 跳过，不入库
-                    continue
-                else:
-                    # 新的更长 → 标记旧为废弃，继续入库新记录
-                    db.mark_episode_discarded(existing_same_name["id"])
-
             ep_records.append({
                 "podcast_id": podcast_id,
                 "eid": ep["eid"],

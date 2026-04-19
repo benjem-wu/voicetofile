@@ -151,7 +151,7 @@ def _extract_episodes_from_html(html: str) -> list[EpisodeInfo]:
     m = re.search(r'"episodes"\s*:\s*\[', html)
     if not m:
         return []
-    chunk = html[m.end():m.end() + 200000]
+    chunk = html[m.end():m.end() + 500000]
 
     # 提取所有 eid
     eid_map = {}  # eid -> episode index

@@ -243,6 +243,18 @@ if __name__ == "__main__":
     # ---- 日志文件配置 ----
     LOG_FILE = Path(__file__).parent / "voicetofile.log"
 
+    # ---- 启动时清理 3 天前的日志文件 ----
+    import time
+    from pathlib import Path
+    _three_days_ago = time.time() - 3 * 86400
+    for _lf in Path(__file__).parent.glob("*.log"):
+        try:
+            if _lf.stat().st_mtime < _three_days_ago:
+                _lf.unlink()
+                print(f"[清理] 已删除过期日志: {_lf.name}")
+        except Exception:
+            pass
+
     # 创建一个 Tee：同时写文件 + stdout
     class TeeWriter:
         def __init__(self, file, stdout):
