@@ -433,6 +433,13 @@ python -m playwright install chromium
 | 2026-04-18 | 终止任务无响应（根因：0311d85引入） | `_proc_to_kill` 被 download 覆盖导致杀错进程；`_start_task_thread` 重复定义导致 `_current_worker_thread` 始终为 None；改为 `_download_proc`/`_transcribe_proc` 分开存储 + `kill_active_subprocess()` 统一杀进程 |
 | 2026-04-18 | 下载无超时保护 | `DOWNLOAD_TIMEOUT=1800` 在代码中定义但从未接入；接入 downloader 并在无输出时检查超时 |
 | 2026-04-18 | 转写进度卡住（0%→10%→0% 循环） | transcriber.py 缺 `import subprocess` 导致所有转写立即失败；`subprocess.run/Popen` 调用处无 import；新增状态文件架构 `_transcribe_state_{episode_id}.json` 作为权威进度来源，worker.py 每秒轮询，替代脆弱的 stdout 解析 |
+| 2026-04-18 | 科技早知道 E05 被误判为付费内容 | `is_paid_episode` 正则过于宽泛，"付费内容"等描述性文字触发误判；改为有具体价格或明确购买词才标付费 |
+| 2026-04-18 | 转写完成后 `status=downloading` 卡住，音频/音频文件未删除 | `queue.Queue(maxsize=100)` 有界队列，STATUS 消息填满队列导致 drainer 阻塞死锁，RESULT 丢失；改为无界队列 `maxsize=0`；`proc.poll()` 退出后先排空队列再 `proc.wait()` 确保 RESULT 不丢失 |
+| 2026-04-18 | 终止任务时 stop API 永久阻塞 | `wait_for_worker_exit()` 无 timeout，网络卡顿时 API 永久阻塞；改为 daemon thread + 5s timeout |
+| 2026-04-18 | 付费检测误判导致任务无限重试 | `episodes` 表无 `retry_count` 列导致重试次数无法持久化；增加 `retry_count` 列 + `increment_retry_count()`，max 2 次重试后标记 failed |
+| 2026-04-18 | fetch_episode_info 无总超时保护 | 网络卡顿时任务永远卡住；增加 90 秒线程超时包装 |
+| 2026-04-18 | TeeWriter 写日志时 UnicodeEncodeError | Windows 终端 GBK 编码无法编码 ¥ 等字符；捕获 `UnicodeEncodeError` 并降级写入 |
+| 2026-04-18 | 数据库含 test_ep_X/Y 脏数据导致 worker 崩溃 | eid 无效（`test_` 前缀或长度<10）；增加 eid 格式校验，无效则直接标记 failed |
 | 2026-04-19 | 转写完成后 UI 卡在 XX% 但 TXT 已生成 | **三处 `proc.wait()` 阻塞**：① `_run_transcriber_subprocess` while 循环 break 前未最后一次轮询状态文件（导致 100% 进度丢失）；② `_process_task` finally 块直接调用 `proc.wait()` 导致僵尸进程挂起；③ `kill_active_subprocess()` 同理；**SSE 广播阻塞**：`broadcast_sse` 的 `sub.put()` 在队列满时无限阻塞，慢消费者卡死整个 worker 线程 |
 
 ---
