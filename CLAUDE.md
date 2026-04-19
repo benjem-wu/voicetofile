@@ -433,6 +433,7 @@ python -m playwright install chromium
 | 2026-04-18 | 终止任务无响应（根因：0311d85引入） | `_proc_to_kill` 被 download 覆盖导致杀错进程；`_start_task_thread` 重复定义导致 `_current_worker_thread` 始终为 None；改为 `_download_proc`/`_transcribe_proc` 分开存储 + `kill_active_subprocess()` 统一杀进程 |
 | 2026-04-18 | 下载无超时保护 | `DOWNLOAD_TIMEOUT=1800` 在代码中定义但从未接入；接入 downloader 并在无输出时检查超时 |
 | 2026-04-18 | 转写进度卡住（0%→10%→0% 循环） | transcriber.py 缺 `import subprocess` 导致所有转写立即失败；`subprocess.run/Popen` 调用处无 import；新增状态文件架构 `_transcribe_state_{episode_id}.json` 作为权威进度来源，worker.py 每秒轮询，替代脆弱的 stdout 解析 |
+| 2026-04-19 | 转写完成后 UI 卡在 XX% 但 TXT 已生成 | **三处 `proc.wait()` 阻塞**：① `_run_transcriber_subprocess` while 循环 break 前未最后一次轮询状态文件（导致 100% 进度丢失）；② `_process_task` finally 块直接调用 `proc.wait()` 导致僵尸进程挂起；③ `kill_active_subprocess()` 同理；**SSE 广播阻塞**：`broadcast_sse` 的 `sub.put()` 在队列满时无限阻塞，慢消费者卡死整个 worker 线程 |
 
 ---
 

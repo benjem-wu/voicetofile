@@ -74,6 +74,74 @@ def format_as_article(segments: list, max_gap: float = 3.0, min_para_len: int = 
     return paragraphs
 
 
+# --------------- GPU 显存监控（nvidia-smi 优先，回退 torch）---------------
+
+def _get_gpu_memory_nvidia_smi() -> tuple:
+    """
+    通过 nvidia-smi 获取 GPU 显存使用量（MB）和总量（MB）。
+    返回 (used_mb, total_mb)，失败返回 (0, 0)。
+    """
+    import subprocess
+    try:
+        # 尝试多个可能的 nvidia-smi 路径
+        candidates = [
+            r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+            "nvidia-smi",  # PATH 中
+        ]
+        for exe in candidates:
+            try:
+                result = subprocess.run(
+                    [exe, "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    line = result.stdout.strip().split('\n')[0]
+                    parts = line.split(',')
+                    if len(parts) == 2:
+                        used_mb = float(parts[0].strip())
+                        total_mb = float(parts[1].strip())
+                        return used_mb, total_mb
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _get_gpu_memory_torch() -> float:
+    """通过 torch.cuda 获取显存使用量（GB），失败返回 0。"""
+    try:
+        import torch
+        torch.cuda.init()
+        if torch.cuda.is_available():
+            return round(torch.cuda.memory_allocated() / 1024**3, 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _monitor_gpu(episode_id: int, status: str, progress: int) -> float:
+    """
+    监控 GPU 显存，返回 used_gb。
+    优先用 nvidia-smi，失败则用 torch.cuda。
+    """
+    used_mb, total_mb = _get_gpu_memory_nvidia_smi()
+    if used_mb > 0 and total_mb > 0:
+        used_gb = round(used_mb / 1024, 2)
+        total_gb = round(total_mb / 1024, 2)
+        print(f"[GPU] episode_id={episode_id} status={status} progress={progress} gpu_mem={used_gb}GB/{total_gb}GB (nvidia-smi)", flush=True)
+        return used_gb
+
+    # 回退到 torch
+    used_gb = _get_gpu_memory_torch()
+    if used_gb > 0:
+        print(f"[GPU] episode_id={episode_id} status={status} progress={progress} gpu_mem={used_gb}GB (torch)", flush=True)
+    else:
+        print(f"[GPU] episode_id={episode_id} status={status} progress={progress} gpu_mem=0.0 (both nvidia-smi and torch failed)", flush=True)
+    return used_gb
+
+
 # --------------- 进度推送 ---------------
 
 def push(event: str, data: str = ""):
@@ -122,6 +190,11 @@ def write_transcribe_state(output_dir: Path, episode_id: int,
         data["error"] = error
     if status_text:
         data["status_text"] = status_text
+
+    # GPU 显存监控（nvidia-smi 优先，torch 回退）
+    mem_gb = _monitor_gpu(episode_id, status, progress)
+    if mem_gb > 0:
+        data["gpu_memory_gb"] = mem_gb
 
     state_file = output_dir / f"_transcribe_state_{episode_id}.json"
     _write_state_file(state_file, data)
@@ -269,6 +342,19 @@ def transcribe(
                         raise
                     _push("status", f"float16 加载失败，尝试 int8: {e}")
         model = _whisper_model_cache
+
+        # 确认 GPU 是否真的可用（nvidia-smi + torch双重验证）
+        import torch
+        _cuda_ok = torch.cuda.is_available()
+        used_mb, total_mb = _get_gpu_memory_nvidia_smi()
+        if used_mb > 0 and total_mb > 0:
+            _gpu_mem = round(used_mb / 1024, 2)
+            _gpu_total = round(total_mb / 1024, 2)
+            print(f"[GPU_CHECK] nvidia_smi: {used_mb}MB/{total_mb}MB ({_gpu_mem}GB/{_gpu_total}GB), torch.cuda_is_available={_cuda_ok}, compute_type={compute_type}", flush=True)
+        else:
+            _gpu_mem = torch.cuda.memory_allocated() / 1024**3 if _cuda_ok else 0
+            print(f"[GPU_CHECK] cuda_available={_cuda_ok}, memory_allocated={_gpu_mem:.2f}GB (torch only), compute_type={compute_type}", flush=True)
+
         _push("status", "[5%] 模型加载完成，开始识别...")
 
         # ---- 转写 ----

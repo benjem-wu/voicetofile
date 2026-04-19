@@ -229,18 +229,20 @@ def _process_task(task: dict):
 
     finally:
         print(f"[finally] episode_id={episode_id} eid={eid} _task_terminated={_task_terminated}")
-        # 杀子进程（如果还在运行）
+        # 杀子进程（如果还在运行）- 用 poll() 非阻塞检查避免僵尸进程无限阻塞
         if _download_proc is not None:
             try:
-                _download_proc.kill()
-                _download_proc.wait()
+                if _download_proc.poll() is None:
+                    _download_proc.kill()
+                    _download_proc.wait()
             except Exception:
                 pass
             _download_proc = None
         if _transcribe_proc is not None:
             try:
-                _transcribe_proc.kill()
-                _transcribe_proc.wait()
+                if _transcribe_proc.poll() is None:
+                    _transcribe_proc.kill()
+                    _transcribe_proc.wait()
             except Exception:
                 pass
             _transcribe_proc = None
@@ -365,6 +367,8 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
 
             if proc.poll() is not None:
                 # 进程已退出：先从状态文件读 result（权威来源）
+                # break 前最后一次轮询，确保 100% 进度被推送到前端
+                _poll_transcribe_state(output_dir, episode_id, eid, last_progress)
                 state = _read_transcribe_state(output_dir, episode_id)
                 if state and state.get("result"):
                     result = state["result"]
@@ -388,12 +392,22 @@ def _run_transcriber_subprocess(audio_file: str, output_dir: Path, episode_name:
 
         elapsed = int(time.time() - start_ts)
         remaining = max(1, timeout - elapsed)
-        try:
-            proc.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            return {"ok": False, "error": f"转写超时（{timeout}秒）"}
+
+        # 关键修复：先 poll() 检查进程是否已退出（不阻塞）
+        # 避免僵尸进程导致 proc.wait() 无限阻塞
+        poll_result = proc.poll()
+        if poll_result is None:
+            # 进程尚未退出，才等待
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                return {"ok": False, "error": f"转写超时（{timeout}秒）"}
+
+        # 双重保护：确保 100% 完成事件被推送
+        if result and result.get("ok"):
+            task_update(eid, status="done_deleted", progress=100)
 
         if result:
             return result
@@ -442,19 +456,21 @@ def wait_for_worker_exit():
 
 
 def kill_active_subprocess():
-    """杀掉当前活跃的子进程（download 或 transcribe）"""
+    """杀掉当前活跃的子进程（download 或 transcribe）- poll() 非阻塞避免僵尸进程挂起"""
     global _download_proc, _transcribe_proc
     if _download_proc is not None:
         try:
-            _download_proc.kill()
-            _download_proc.wait()
+            if _download_proc.poll() is None:
+                _download_proc.kill()
+                _download_proc.wait()
         except Exception:
             pass
         _download_proc = None
     if _transcribe_proc is not None:
         try:
-            _transcribe_proc.kill()
-            _transcribe_proc.wait()
+            if _transcribe_proc.poll() is None:
+                _transcribe_proc.kill()
+                _transcribe_proc.wait()
         except Exception:
             pass
         _transcribe_proc = None
