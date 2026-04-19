@@ -211,6 +211,36 @@ def api_refresh_episodes():
                 )
         conn.commit()
 
+        # ---- 同步已有 episode 的文件状态：txt 文件存在但 status 非 done_deleted → 修正 ----
+        podcast_dir = config.OUTPUT_ROOT / p["name"]
+        existing_eps = list(conn.execute(
+            "SELECT id, name, status, txt_path FROM episodes WHERE podcast_id = ? AND status != 'done_deleted'",
+            (podcast_id,)
+        ).fetchall())
+        fixed_count = 0
+        for ep_row in existing_eps:
+            ep_id, ep_name, ep_status, ep_txt_path = ep_row
+            if ep_txt_path and os.path.exists(ep_txt_path):
+                continue  # 已有正确路径，跳过
+            # 按与 transcriber 相同的方式构造文件名来查找
+            clean = ep_name.replace('\n', ' ').strip()
+            illegal = '<>:"/\\|?*'
+            for ch in illegal:
+                clean = clean.replace(ch, '_')
+            clean = clean.strip(' .')
+            if len(clean) > 200:
+                clean = clean[:200]
+            txt_file = podcast_dir / f"{clean}_文字稿.txt"
+            if txt_file.exists():
+                conn.execute(
+                    "UPDATE episodes SET status = 'done_deleted', txt_path = ?, updated_at = ? WHERE id = ?",
+                    (str(txt_file), datetime.now().isoformat(), ep_id)
+                )
+                fixed_count += 1
+        if fixed_count > 0:
+            conn.commit()
+            addLog(f"[刷新] 修正 {fixed_count} 个 episode 状态（文件存在但 DB 未同步）", "done")
+
         new_eids = [ep["eid"] for ep in valid_episodes if ep["eid"] not in existing_eids]
         new_count = len(new_eids)
 

@@ -442,6 +442,11 @@ python -m playwright install chromium
 | 2026-04-18 | 数据库含 test_ep_X/Y 脏数据导致 worker 崩溃 | eid 无效（`test_` 前缀或长度<10）；增加 eid 格式校验，无效则直接标记 failed |
 | 2026-04-19 | 转写完成后 UI 卡在 XX% 但 TXT 已生成 | **三处 `proc.wait()` 阻塞**：① `_run_transcriber_subprocess` while 循环 break 前未最后一次轮询状态文件（导致 100% 进度丢失）；② `_process_task` finally 块直接调用 `proc.wait()` 导致僵尸进程挂起；③ `kill_active_subprocess()` 同理；**SSE 广播阻塞**：`broadcast_sse` 的 `sub.put()` 在队列满时无限阻塞，慢消费者卡死整个 worker 线程 |
 | 2026-04-19 | 进度文字显示混乱（音频下载中 / 正在转文字多少 交替出现） | 转写状态文件 `status_text` 值如 `"[45%] 转写中 12.5/30.0分钟"` 前缀 `[N%]` 与进度条百分比重复显示；前端 ticker 过滤掉 `status_text` 中的 `[N%]` 模式，前端显示：百分比（进度条）+ 阶段描述（如"转写中 12.5/30.0分钟"） |
+| 2026-04-19 | Flask 重启后转写子进程继续独立运行，DB 被 `cleanup_stale_tasks` 重置为 `pending`，TXT 已生成但队列页不显示 | `cleanup_stale_tasks()` 启动时检查 TXT 文件是否已存在：存在则标记 `done_deleted`，不存在才恢复 `pending`；同时在输出目录按命名规则查找 `*_文字稿.txt` |
+| 2026-04-19 | 队列页 F5 刷新后显示"暂无正在处理的任务"（第一次刷新正常，第二次异常） | 三重兜底：① `cleanup_stale_tasks()` 正确识别已完成的 TXT；② `/api/queue` 扫描 `_transcribe_state_*.json` 状态文件补充孤儿转写进程；③ `queue.html` 用 `sessionStorage` 缓存活跃任务，API 返回0个活跃任务时自动从缓存恢复（30分钟有效） |
+| 2026-04-19 | 首页 ticker 显示任务 ID 而非名称（`6989cc6266e2c30377a5b227`），刷新后丢失 | 首页 ticker 缓存 `_tickerTasks` 改用 Map 合并策略（API 权威数据优先 + 缓存补全 LIMIT 50 截断的完成/失败任务）；`sessionStorage` 缓存最近完成任务（30分钟），缺失 `name/podcast_name` 时从中兜底查找 |
+| 2026-04-19 | 刷新播客时 TXT 文件已存在但 status 非 `done_deleted` 的 episode 未被修正 | `api_refresh_episodes()` 新增同步逻辑：遍历已有 episode，按命名规则查找 `*_文字稿.txt`，若文件存在则修正 status 为 `done_deleted` |
+| 2026-04-19 | `routes/queue.py` 缺少 `config` 模块引用导致 500 错误 | 添加 `import config`；修复 `conn` 在 `finally: conn.close()` 后被继续使用（改用独立 `conn2`） |
 
 ---
 

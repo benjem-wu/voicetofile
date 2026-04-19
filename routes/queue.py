@@ -8,6 +8,7 @@ from pathlib import Path
 
 import db
 import worker as w
+import config
 from sse import broadcast_sse
 
 queue_bp = Blueprint("queue", __name__, url_prefix="/api/queue")
@@ -55,7 +56,10 @@ def api_queue_stop():
 
 @queue_bp.route("")
 def api_queue():
-    """获取当前队列状态（纯 DB）"""
+    """获取当前队列状态（DB + 转写状态文件兜底）"""
+    import json, time as time_mod
+    from datetime import datetime
+
     conn = db.get_conn()
     try:
         cur = conn.execute("""
@@ -70,4 +74,70 @@ def api_queue():
         tasks = [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
+
+    # ---- 转写状态文件兜底：Flask 重启后 worker 丢失的 transcriber 子进程 ----
+    # 扫描所有 _transcribe_state_{episode_id}.json，若 status=transcribing 且近期有更新，
+    # 则补充该任务（即使 DB 状态被 cleanup_stale_tasks 改成了 pending）
+    active_eids = {t['eid'] for t in tasks if t['status'] in ('downloading', 'transcribing')}
+    output_root = config.OUTPUT_ROOT
+
+    if output_root.exists():
+        # 遍历所有播客输出目录
+        for podcast_dir in output_root.iterdir():
+            if not podcast_dir.is_dir():
+                continue
+            for sf in podcast_dir.glob("_transcribe_state_*.json"):
+                try:
+                    with open(sf, encoding='utf-8') as f:
+                        state = json.load(f)
+                    if state.get('status') != 'transcribing':
+                        continue
+
+                    # 检查是否近期有更新（5分钟内），排除僵尸文件
+                    updated_at_str = state.get('updated_at', '')
+                    if updated_at_str:
+                        try:
+                            file_time = datetime.fromisoformat(updated_at_str.replace(' ', 'T'))
+                            age_seconds = (datetime.now() - file_time).total_seconds()
+                            if age_seconds > 300:
+                                continue
+                        except Exception:
+                            pass
+
+                    # 从文件名提取 episode_id
+                    ep_id_str = sf.stem.replace('_transcribe_state_', '')
+                    try:
+                        episode_id = int(ep_id_str)
+                    except ValueError:
+                        continue
+
+                    ep = db.get_episode_by_id(episode_id)
+                    if not ep:
+                        continue
+                    eid = ep['eid']
+                    if eid in active_eids:
+                        continue
+
+                    # 查播客名
+                    conn2 = db.get_conn()
+                    try:
+                        p_row = conn2.execute("SELECT name FROM podcasts WHERE id = ?", (ep['podcast_id'],)).fetchone()
+                        podcast_name = p_row['name'] if p_row else podcast_dir.name
+                    finally:
+                        conn2.close()
+
+                    tasks.insert(0, {
+                        'id': episode_id,
+                        'eid': eid,
+                        'name': ep['name'],
+                        'podcast_name': podcast_name,
+                        'status': 'transcribing',
+                        'progress': state.get('progress', 0),
+                        'updated_at': ep['updated_at'],
+                    })
+                    active_eids.add(eid)
+                    print(f"[api_queue] 从状态文件补充: {podcast_name} — {ep['name']}")
+                except Exception as ex:
+                    print(f"[api_queue] 扫描 {sf}: {ex}")
+
     return jsonify({"tasks": tasks})

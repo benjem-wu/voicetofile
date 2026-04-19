@@ -740,19 +740,75 @@ def update_task_progress(episode_id: int, progress: int):
 def cleanup_stale_tasks() -> int:
     """
     Flask 启动时调用。
-    将 downloading/transcribing 状态的残留任务恢复为 pending（进程崩溃/强制退出后遗留）。
-    音频/显存可能已泄漏，但 DB 记录保留，供用户手动重新入队。
+    处理 downloading/transcribing 残留任务：
+    - 若 txt_path 文件存在 → 标记 done_deleted（转写已独立完成，只是 DB 未更新）
+    - 若 txt_path 不存在 → 恢复为 pending（进程崩溃/强制退出，需要重新处理）
     返回清理的任务数量。
     """
+    import os
     conn = get_conn()
+    cleaned = 0
+    now = datetime.now().isoformat()
     try:
-        cur = conn.execute("""
-            UPDATE episodes
-            SET status = 'pending', progress = 0, updated_at = ?
+        rows = conn.execute("""
+            SELECT id, name, txt_path, podcast_id FROM episodes
             WHERE status IN ('downloading', 'transcribing')
-        """, (datetime.now().isoformat(),))
+        """).fetchall()
+
+        for row in rows:
+            ep_id = row['id']
+            ep_name = row['name']
+            ep_txt_path = row['txt_path'] or ''
+            p_row = conn.execute("SELECT name FROM podcasts WHERE id = ?", (row['podcast_id'],)).fetchone()
+            podcast_name = p_row['name'] if p_row else ''
+
+            # 构造可能的 txt 文件路径（转写独立完成时，文件可能在默认输出目录）
+            if not ep_txt_path or not os.path.exists(ep_txt_path):
+                # 按命名规则查找 txt 文件
+                clean = ep_name.replace('\n', ' ').strip()
+                illegal = '<>:"/\\|?*'
+                for ch in illegal:
+                    clean = clean.replace(ch, '_')
+                clean = clean.strip(' .')
+                if len(clean) > 200:
+                    clean = clean[:200]
+                from pathlib import Path
+                out_dir = config.OUTPUT_ROOT / podcast_name
+                candidates = [
+                    Path(ep_txt_path) if ep_txt_path else None,
+                    out_dir / f"{clean}_文字稿.txt",
+                ]
+                found_path = None
+                for cand in candidates:
+                    if cand and cand.exists():
+                        found_path = str(cand)
+                        break
+
+                if found_path:
+                    conn.execute("""
+                        UPDATE episodes SET status = 'done_deleted', txt_path = ?, progress = 100, updated_at = ?
+                        WHERE id = ?
+                    """, (found_path, now, ep_id))
+                    print(f"[cleanup] 转写已独立完成，标记 done_deleted: {ep_id} {ep_name}")
+                    cleaned += 1
+                else:
+                    conn.execute("""
+                        UPDATE episodes SET status = 'pending', progress = 0, updated_at = ?
+                        WHERE id = ?
+                    """, (now, ep_id))
+                    print(f"[cleanup] 残留任务恢复为 pending: {ep_id} {ep_name}")
+                    cleaned += 1
+            else:
+                # txt_path 存在但状态还是 downloading/transcribing → 直接标记完成
+                conn.execute("""
+                    UPDATE episodes SET status = 'done_deleted', progress = 100, updated_at = ?
+                    WHERE id = ?
+                """, (now, ep_id))
+                print(f"[cleanup] txt 已存在，标记 done_deleted: {ep_id} {ep_name}")
+                cleaned += 1
+
         conn.commit()
-        return cur.rowcount
+        return cleaned
     finally:
         conn.close()
 

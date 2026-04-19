@@ -76,6 +76,9 @@
 </div>
 
 <script>
+// ---- sessionStorage 常量 ----
+const DONE_KEY = 'vtf_queue_done';
+
 // ---- SSE 实时更新（带自动重连）----
 let evtSource = null;
 let sseReconnectDelay = 1000;
@@ -228,6 +231,17 @@ function updateQueueUI(tasks) {
   }
 
   document.getElementById('update-time').textContent = '页面自动刷新，每秒更新';
+
+  // 保存到 sessionStorage：活跃任务（防止 F5 后 API 漏掉导致空白）+ 最近3个已完成
+  try {
+    const activeTask = active[0] || null;
+    const recentDone = done.slice(0, 3);
+    sessionStorage.setItem(DONE_KEY, JSON.stringify({
+      active: activeTask,
+      done: recentDone,
+      ts: Date.now()
+    }));
+  } catch (e) {}
 }
 
 async function loadQueue() {
@@ -235,18 +249,42 @@ async function loadQueue() {
     const resp = await fetch('/api/queue');
     const data = await resp.json();
     const tasks = data.tasks || [];
+    // 合并策略：API 权威数据优先 + 完成任务从缓存补全（解决 LIMIT 50 丢数据问题）
     if (!window._cachedTasks) {
-      // 首次加载：直接初始化缓存
       window._cachedTasks = tasks;
     } else {
-      // 增量合并：只补充新任务，不覆盖已有任务状态（SSE 实时更新优先）
-      const cacheEids = new Set(window._cachedTasks.map(t => t.eid));
+      const cacheMap = new Map();
+      // API 数据优先（权威，包含所有字段）
       for (const t of tasks) {
-        if (!cacheEids.has(t.eid)) {
-          window._cachedTasks.push(t);
+        cacheMap.set(t.eid, t);
+      }
+      // 缓存补缺：done_deleted/failed 任务若不在 API 结果中则保留
+      for (const t of window._cachedTasks) {
+        if (!cacheMap.has(t.eid) && (t.status === 'done_deleted' || t.status === 'failed')) {
+          cacheMap.set(t.eid, t);
         }
       }
+      window._cachedTasks = Array.from(cacheMap.values());
     }
+
+    // sessionStorage 兜底：当 API 返回0个活跃任务时（可能刚好在两个任务之间或 LIMIT 50 挤掉了活跃任务）
+    const activeNow = window._cachedTasks.filter(t => t.status === 'downloading' || t.status === 'transcribing');
+    if (activeNow.length === 0) {
+      try {
+        const cached = JSON.parse(sessionStorage.getItem(DONE_KEY) || '{}');
+        const age = (Date.now() - (cached.ts || 0)) / 1000;
+        // 30分钟内且有活跃任务缓存
+        if (age < 1800 && cached.active) {
+          const alreadyHave = window._cachedTasks.find(t => t.eid === cached.active.eid);
+          if (!alreadyHave) {
+            window._cachedTasks.unshift(cached.active);
+            console.log('[loadQueue] 从 sessionStorage 恢复活跃任务:', cached.active.name);
+          }
+        }
+      } catch (e) {}
+    }
+
+    console.log('[loadQueue] apiTasks count:', tasks.length, 'cachedTasks count:', window._cachedTasks.length, 'active:', window._cachedTasks.filter(t => t.status === 'downloading' || t.status === 'transcribing').map(t => t.name));
     updateQueueUI(window._cachedTasks);
   } catch (e) {
     console.error('加载队列失败:', e);

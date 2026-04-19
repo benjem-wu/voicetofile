@@ -1289,16 +1289,45 @@ async function openPodcastFolder(podcastId) {
 }
 
 // ============ 队列视图 ============
+const DONE_KEY = '_vtf_done'; // sessionStorage key for recently completed tasks
+
 async function loadQueue() {
   try {
     const resp = await fetch('/api/queue');
     const data = await resp.json();
-    // 用 API 数据更新走马灯缓存（作为 SSE 的补充，防止漏掉）
-    if (data.tasks) {
-      window._tickerTasks = data.tasks;
-      updateTicker(window._tickerTasks);
+    const apiTasks = data.tasks || [];
+
+    // 从 sessionStorage 恢复最近完成的任务（刷新后仍显示，30分钟内）
+    const doneTasks = JSON.parse(sessionStorage.getItem(DONE_KEY) || '[]');
+    const now = Date.now();
+    const recentDone = doneTasks.filter(t => now - t._doneAt < 30 * 60 * 1000);
+    // 清理过期的已完成记录
+    if (doneTasks.length !== recentDone.length) {
+      sessionStorage.setItem(DONE_KEY, JSON.stringify(recentDone));
     }
-    // 注意：renderQueue 是 queue.html 的渲染函数，主页不需要调用
+
+    // 合并策略：API 权威数据优先 + 完成任务从缓存补全（解决 LIMIT 50 丢数据问题）
+    const map = new Map();
+    // API 数据优先（权威，包含所有字段）
+    for (const t of apiTasks) {
+      map.set(t.eid, t);
+    }
+    // 缓存补缺：done_deleted/failed 任务若不在 API 结果中则保留（它们不会再变化，
+    // 但可能因 LIMIT 50 被截断，导致刷新后丢失）
+    if (window._tickerTasks) {
+      for (const t of window._tickerTasks) {
+        if (!map.has(t.eid) && (t.status === 'done_deleted' || t.status === 'failed')) {
+          map.set(t.eid, t);
+        }
+      }
+    }
+    // sessionStorage 补缺：仅当 active 任务列表中不存在时才加入
+    for (const t of recentDone) {
+      if (!map.has(t.eid)) map.set(t.eid, t);
+    }
+
+    window._tickerTasks = Array.from(map.values());
+    updateTicker(window._tickerTasks);
   } catch (e) {
     console.error('加载队列失败:', e);
   }
@@ -1310,7 +1339,7 @@ function updateTicker(tasks) {
     console.warn('[Ticker] #ticker-items not found');
     return;
   }
-  console.log('[Ticker] tasks:', tasks.map(t => ({ eid: t.eid, status: t.status })));
+  console.log('[Ticker] tasks:', tasks.map(t => ({ eid: t.eid, status: t.status, name: t.name, podcast_name: t.podcast_name })));
 
   // 优先显示正在处理的任务（包括刚入队等待处理的状态：pending/queued）
   const current = tasks.find(t =>
@@ -1325,12 +1354,54 @@ function updateTicker(tasks) {
     // 过滤掉 status_text 中的 [N%] 前缀（避免和 pct% 重复），保留剩余描述
     const rawText = current.status_text || '';
     const descText = rawText.replace(/^\[\d+%]\s*/, '').replace(/\s*\[\d+%].*$/, '');
+    // 优先用 name/podcast_name，缺失时从 sessionStorage 兜底查找
+    let namePart = '';
+    if (current.podcast_name && current.name) {
+      namePart = `<span class="name">${escapeHtml(current.podcast_name)}</span> — ${escapeHtml(current.name)}`;
+    } else {
+      // 兜底：尝试从 sessionStorage 找到同名任务获取完整信息
+      const doneTasks = JSON.parse(sessionStorage.getItem(DONE_KEY) || '[]');
+      const cached = doneTasks.find(t => t.eid === current.eid);
+      if (cached && cached.podcast_name && cached.name) {
+        namePart = `<span class="name">${escapeHtml(cached.podcast_name)}</span> — ${escapeHtml(cached.name)}`;
+      } else {
+        namePart = escapeHtml(current.eid || '未知任务');
+      }
+    }
     tickerItems.innerHTML = `
       <span class="ticker-item">
-        <span class="name">${escapeHtml(current.podcast_name)}</span> — ${escapeHtml(current.name)}
+        ${namePart}
         ${pct > 0 ? `<span class="status">${pct}%</span>` : ''}
         <span class="status">[${statusLabel}]</span>
         ${descText ? `<span class="status">${escapeHtml(descText)}</span>` : ''}
+      </span>`;
+    return;
+  }
+
+  // 无活跃任务时，显示最近完成的任务（从 sessionStorage 恢复，刷新后依然可见）
+  const done = tasks.find(t => t.status === 'done_deleted' || t.status === 'failed');
+  if (done) {
+    console.log('[Ticker] done task:', { eid: done.eid, name: done.name, podcast_name: done.podcast_name });
+    const mins = Math.round((done.elapsed || 0) / 60);
+    const timeStr = mins > 0 ? `，用时${mins}分钟` : '';
+    let doneNamePart = '';
+    if (done.podcast_name && done.name) {
+      doneNamePart = `<span class="name">${escapeHtml(done.podcast_name)}</span> — ${escapeHtml(done.name)}`;
+    } else {
+      // 兜底：从 sessionStorage 找
+      const doneTasks = JSON.parse(sessionStorage.getItem(DONE_KEY) || '[]');
+      const cached = doneTasks.find(t => t.eid === done.eid);
+      console.log('[Ticker] sessionStorage lookup:', { eid: done.eid, found: !!cached, cached_name: cached?.name, cached_podcast: cached?.podcast_name });
+      if (cached && cached.podcast_name && cached.name) {
+        doneNamePart = `<span class="name">${escapeHtml(cached.podcast_name)}</span> — ${escapeHtml(cached.name)}`;
+      } else {
+        doneNamePart = escapeHtml(done.eid || '未知任务');
+      }
+    }
+    tickerItems.innerHTML = `
+      <span class="ticker-item">
+        ${doneNamePart}
+        <span class="status">[已完成${timeStr}]</span>
       </span>`;
     return;
   }
@@ -1937,6 +2008,18 @@ homeEvtSource.addEventListener('task_done', async (e) => {
   if (tIdx >= 0) {
     window._tickerTasks[tIdx].status = 'done_deleted';
   }
+  // 存入 sessionStorage（刷新页面后仍能显示已完成任务）
+  const doneTasks = JSON.parse(sessionStorage.getItem(DONE_KEY) || '[]');
+  const existing = doneTasks.findIndex(t => t.eid === task.eid);
+  const doneRecord = { ...task, _doneAt: Date.now() };
+  if (existing >= 0) {
+    doneTasks[existing] = doneRecord;
+  } else {
+    doneTasks.unshift(doneRecord);
+  }
+  // 最多保留 10 条
+  if (doneTasks.length > 10) doneTasks.length = 10;
+  sessionStorage.setItem(DONE_KEY, JSON.stringify(doneTasks));
   updateTicker(window._tickerTasks);
 
   // 2. 强制刷新用户当前可见的视图，不依赖 episodeCache（刷新后可能为空）
