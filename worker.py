@@ -191,12 +191,29 @@ def _process_task(task: dict):
         })
         addLog(f"[完成] {episode_name[:30]}，用时 {int(total_elapsed)}秒，已删除音频", "done")
 
-        # ---- 清理 ----
+        # ---- 精准清理：只留文字稿，删除所有临时文件 ----
         dl.cleanup_progress(eid)
         try:
             Path(audio_file).unlink(missing_ok=True)
         except Exception:
             pass
+        try:
+            # 转写状态文件（按 episode_id 精准删除）
+            (output_dir / f"_transcribe_state_{episode_id}.json").unlink(missing_ok=True)
+            (output_dir / f"_transcribe_state_{episode_id}.tmp").unlink(missing_ok=True)
+            # 转写结果文件（所有 PID 的结果文件，转写子进程已结束，可以全量删）
+            for f in output_dir.glob("_transcribe_result_*.json"):
+                f.unlink(missing_ok=True)
+            # 下载进度文件（双重保险）
+            (output_dir / f"_download_progress_{eid}.txt").unlink(missing_ok=True)
+            # 原始音频文件残留（双重保险）
+            clean_name = episode_name.replace('\n', ' ').strip()[:80]
+            illegal = '<>:"/\\|?*'
+            for ch in illegal:
+                clean_name = clean_name.replace(ch, '_')
+            (output_dir / f"{clean_name}.m4a").unlink(missing_ok=True)
+        except Exception as ex:
+            print(f"[清理] 残留文件清理失败: {ex}")
 
     except Exception as e:
         total_elapsed = time.time() - start_time
