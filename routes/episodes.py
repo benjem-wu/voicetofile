@@ -244,6 +244,10 @@ def api_refresh_episodes():
         new_eids = [ep["eid"] for ep in valid_episodes if ep["eid"] not in existing_eids]
         new_count = len(new_eids)
 
+        # 标记新集为未读（is_new=1），前端据此显示红点
+        if new_eids:
+            db.mark_episodes_new(podcast_id, new_eids)
+
         addLog(f"[刷新] 完成，共 {len(info.episodes)} 集，新增 {new_count} 集", "done")
         return jsonify({
             "ok": True,
