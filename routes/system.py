@@ -64,6 +64,22 @@ def api_podcasts_new_ids():
     return jsonify({"new_podcast_ids": db.get_podcasts_with_new()})
 
 
+@system_bp.route("/cleanup")
+def cleanup():
+    """清理 localStorage 中的单页保护标记，然后跳转到首页"""
+    html = """<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+<script>
+localStorage.removeItem('vtf_page_active');
+location.href = '/';
+</script>
+</body>
+</html>"""
+    return html
+
+
 @system_bp.route("/api/refresh", methods=["POST"])
 def api_refresh():
     def restart():

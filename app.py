@@ -69,27 +69,38 @@ def _acquire_lock():
     lock_path = config.LOCK_FILE
     pid_path = config.PID_FILE
 
-    try:
-        _lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-        pid_path.write_text(str(os.getpid()), encoding='utf-8')
-        return True
-    except FileExistsError:
-        # 检查旧进程是否还活着
+    for attempt in range(3):
         try:
-            old_pid = int(pid_path.read_text(encoding='utf-8').strip())
-            if _is_process_running(old_pid):
-                print(f"[启动] VoiceToFile 已在运行中 (PID={old_pid})")
-                return False
-            # 旧进程已死，强制重新获取锁
-            lock_path.unlink(missing_ok=True)
-            pid_path.unlink(missing_ok=True)
             _lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
             pid_path.write_text(str(os.getpid()), encoding='utf-8')
             return True
+        except FileExistsError:
+            # 检查旧进程是否还活着
+            try:
+                old_pid = int(pid_path.read_text(encoding='utf-8').strip())
+                if _is_process_running(old_pid):
+                    print(f"[启动] VoiceToFile 已在运行中 (PID={old_pid})")
+                    return False
+                # 旧进程已死，强制重新获取锁（重试3次，防 Windows 文件句柄延迟释放）
+                for r in range(3):
+                    try:
+                        lock_path.unlink(missing_ok=True)
+                        pid_path.unlink(missing_ok=True)
+                        break
+                    except PermissionError:
+                        import time; time.sleep(0.5)
+                else:
+                    return False
+            except Exception:
+                # PID 文件损坏或读取失败，强制清理
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    pid_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
         except Exception:
-            return False
-    except Exception:
-        return False
+            pass
+    return False
 
 
 def _release_lock():
