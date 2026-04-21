@@ -468,6 +468,39 @@ def fetch_episode_info(eid: str, share_token: str = "", interval: int = DEFAULT_
     return get_scraper(interval=interval).fetch_episode_detail(eid, share_token=share_token)
 
 
+def fetch_episodes_audio_info(episodes: list, max_workers: int = 3) -> list[dict]:
+    """
+    并行验证一批 episode 的音频 URL 并获取真实时长。
+    输入：PodcastInfo.episodes 列表（每个元素有 .eid .name .pub_date .is_paid 等属性）
+    返回：[{
+        "eid", "name", "pub_date", "duration", "is_paid",
+        "paid_price", "description", "has_audio"
+    }]
+    所有调用方共用此函数，保证刷新/订阅逻辑完全一致。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_one(ep):
+        detail = fetch_episode_info(ep.eid, interval=1)
+        return {
+            "eid": ep.eid,
+            "name": ep.name,
+            "pub_date": ep.pub_date,
+            "duration": detail.duration,
+            "is_paid": ep.is_paid,
+            "paid_price": getattr(ep, "paid_price", None),
+            "description": getattr(ep, "description", ""),
+            "has_audio": bool(detail.audio_url),
+        }
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, ep): ep for ep in episodes}
+        results = []
+        for future in as_completed(futures):
+            results.append(future.result())
+    return results
+
+
 def set_cookie(cookie: str):
     save_cookie(cookie)
     global _scraper

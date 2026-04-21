@@ -12,6 +12,8 @@ import db
 import scraper
 import worker as w
 from sse import addLog, task_update, broadcast_sse
+from scraper import fetch_episodes_audio_info
+from _utils import get_txt_path
 import config
 
 episodes_bp = Blueprint("episodes", __name__, url_prefix="/api")
@@ -152,28 +154,8 @@ def api_refresh_episodes():
                 episode_count=info.episode_count,
             )
 
-        # 并行验证音频 URL 并获取真实时长（与 fetch_one_audio 逻辑一致）
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def fetch_one_audio(ep):
-            detail = scraper.fetch_episode_info(ep.eid, interval=1)
-            return {
-                "eid": ep.eid,
-                "name": ep.name,
-                "pub_date": ep.pub_date,
-                "duration": detail.duration,
-                "is_paid": ep.is_paid,
-                "paid_price": getattr(ep, "paid_price", None),
-                "description": getattr(ep, "description", ""),
-                "has_audio": bool(detail.audio_url),
-            }
-
-        episodes_with_audio = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(fetch_one_audio, ep): ep for ep in info.episodes}
-            for future in as_completed(futures):
-                episodes_with_audio.append(future.result())
-
+        # 并行验证音频 URL 并获取真实时长（与订阅共用同一实现）
+        episodes_with_audio = fetch_episodes_audio_info(info.episodes)
         valid_episodes = [ep for ep in episodes_with_audio if ep["has_audio"]]
         skipped = len(info.episodes) - len(valid_episodes)
         if skipped > 0:
@@ -223,14 +205,7 @@ def api_refresh_episodes():
             if ep_txt_path and os.path.exists(ep_txt_path):
                 continue  # 已有正确路径，跳过
             # 按与 transcriber 相同的方式构造文件名来查找
-            clean = ep_name.replace('\n', ' ').strip()
-            illegal = '<>:"/\\|?*'
-            for ch in illegal:
-                clean = clean.replace(ch, '_')
-            clean = clean.strip(' .')
-            if len(clean) > 200:
-                clean = clean[:200]
-            txt_file = podcast_dir / f"{clean}_文字稿.txt"
+            txt_file = get_txt_path(podcast_dir, ep_name)
             if txt_file.exists():
                 conn.execute(
                     "UPDATE episodes SET status = 'done_deleted', txt_path = ?, updated_at = ? WHERE id = ?",

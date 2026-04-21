@@ -7,6 +7,15 @@ import os
 from pathlib import Path
 
 
+def get_txt_path(podcast_dir: Path, episode_name: str) -> Path:
+    """
+    根据播客目录和 episode 名称，构造"文字稿.txt"文件路径。
+    与 transcriber.py 的命名逻辑保持一致。
+    """
+    clean = sanitize_filename(episode_name)
+    return podcast_dir / f"{clean}_文字稿.txt"
+
+
 def sanitize_filename(name: str) -> str:
     """清理文件名，移除 Windows 非法字符"""
     if not name:

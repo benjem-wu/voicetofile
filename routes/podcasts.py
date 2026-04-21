@@ -9,6 +9,7 @@ import db
 import scraper
 from _utils import format_duration
 import worker as w
+from scraper import fetch_episodes_audio_info
 
 podcasts_bp = Blueprint("podcasts", __name__, url_prefix="/api/podcast")
 
@@ -19,7 +20,6 @@ def api_fetch_podcast():
     模式A：从 URL 或 PID 获取播客信息
     POST body: {"url": "..."} 或 {"pid": "..."}
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from sse import addLog
     import config
 
@@ -38,25 +38,7 @@ def api_fetch_podcast():
         info = scraper.fetch_podcast_info(pid, interval=config.COOKIE_INTERVAL)
         addLog(f"[播客] 名称: {info.name}，共 {len(info.episodes)} 集，正在验证音频...", "done")
 
-        def fetch_one_audio(ep):
-            detail = scraper.fetch_episode_info(ep.eid, interval=1)
-            return {
-                "eid": ep.eid,
-                "name": ep.name,
-                "pub_date": ep.pub_date,
-                "duration": detail.duration,
-                "is_paid": ep.is_paid,
-                "paid_price": getattr(ep, "paid_price", None),
-                "description": getattr(ep, "description", ""),
-                "has_audio": bool(detail.audio_url),
-            }
-
-        episodes_with_audio = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(fetch_one_audio, ep): ep for ep in info.episodes}
-            for future in as_completed(futures):
-                episodes_with_audio.append(future.result())
-
+        episodes_with_audio = fetch_episodes_audio_info(info.episodes)
         valid_episodes = [ep for ep in episodes_with_audio if ep["has_audio"]]
         skipped = len(info.episodes) - len(valid_episodes)
         if skipped > 0:
