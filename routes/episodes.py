@@ -12,9 +12,8 @@ import db
 import scraper
 import worker as w
 from sse import addLog, task_update, broadcast_sse
-from scraper import fetch_episodes_audio_info
-from _utils import get_txt_path
 import config
+from services import refresh_podcast
 
 episodes_bp = Blueprint("episodes", __name__, url_prefix="/api")
 
@@ -128,112 +127,10 @@ def api_refresh_episodes():
     data = request.get_json()
     podcast_id = int(data["podcast_id"])
 
-    from sse import addLog
-
-    try:
-        # 取 pid
-        p = db.get_conn().execute("SELECT * FROM podcasts WHERE id = ?", (podcast_id,)).fetchone()
-        if not p:
-            return jsonify({"ok": False, "error": "播客不存在"})
-        pid = p["pid"]
-
-        info = scraper.fetch_podcast_info(pid, interval=config.COOKIE_INTERVAL)
-
-        if info.name:
-            db.add_podcast(pid, info.name)
-            updated_name = info.name
-
-        # 同步播客详情（作者/订阅数/封面/简介）
-        if info.author or info.subscriber_count:
-            db.upsert_podcast_details(
-                podcast_id=podcast_id,
-                author=info.author,
-                description=info.description,
-                cover_url=info.cover_url,
-                subscriber_count=info.subscriber_count,
-                episode_count=info.episode_count,
-            )
-
-        # 并行验证音频 URL 并获取真实时长（与订阅共用同一实现）
-        episodes_with_audio = fetch_episodes_audio_info(info.episodes)
-        valid_episodes = [ep for ep in episodes_with_audio if ep["has_audio"]]
-        skipped = len(info.episodes) - len(valid_episodes)
-        if skipped > 0:
-            addLog(f"[刷新] 跳过 {skipped} 集（无音频，占位集）", "done")
-
-        # 刷新前记录 DB 中已有的 eid
-        conn = db.get_conn()
-        existing_eids = set(
-            row["eid"] for row in conn.execute(
-                "SELECT eid FROM episodes WHERE podcast_id = ?", (podcast_id,)
-            ).fetchall()
-        )
-
-        # 入库前去重：只按 eid 精确去重（不同 eid 即使同名也入库）
-        # 小宇宙同一标题可能有多集（不同日期/不同录音），不再是废弃关系
-        ep_records = []
-        for ep in valid_episodes:
-            ep_records.append({
-                "podcast_id": podcast_id,
-                "eid": ep["eid"],
-                "name": ep["name"],
-                "pub_date": ep["pub_date"],
-                "duration": ep["duration"],
-                "is_paid": ep["is_paid"],
-            })
-
-        db.add_episodes(ep_records)
-
-        # 更新已有记录的时长（INSERT OR IGNORE 不更新现有记录）
-        for ep in valid_episodes:
-            if ep["eid"] in existing_eids and ep["duration"]:
-                conn.execute(
-                    "UPDATE episodes SET duration = ? WHERE podcast_id = ? AND eid = ? AND duration != ?",
-                    (ep["duration"], podcast_id, ep["eid"], ep["duration"])
-                )
-        conn.commit()
-
-        # ---- 同步已有 episode 的文件状态：txt 文件存在但 status 非 done_deleted → 修正 ----
-        podcast_dir = config.OUTPUT_ROOT / p["name"]
-        existing_eps = list(conn.execute(
-            "SELECT id, name, status, txt_path FROM episodes WHERE podcast_id = ? AND status != 'done_deleted'",
-            (podcast_id,)
-        ).fetchall())
-        fixed_count = 0
-        for ep_row in existing_eps:
-            ep_id, ep_name, ep_status, ep_txt_path = ep_row
-            if ep_txt_path and os.path.exists(ep_txt_path):
-                continue  # 已有正确路径，跳过
-            # 按与 transcriber 相同的方式构造文件名来查找
-            txt_file = get_txt_path(podcast_dir, ep_name)
-            if txt_file.exists():
-                conn.execute(
-                    "UPDATE episodes SET status = 'done_deleted', txt_path = ?, updated_at = ? WHERE id = ?",
-                    (str(txt_file), datetime.now().isoformat(), ep_id)
-                )
-                fixed_count += 1
-        if fixed_count > 0:
-            conn.commit()
-            addLog(f"[刷新] 修正 {fixed_count} 个 episode 状态（文件存在但 DB 未同步）", "done")
-
-        new_eids = [ep["eid"] for ep in valid_episodes if ep["eid"] not in existing_eids]
-        new_count = len(new_eids)
-
-        # 标记新集为未读（is_new=1），前端据此显示红点
-        if new_eids:
-            db.mark_episodes_new(podcast_id, new_eids)
-
-        addLog(f"[刷新] 完成，共 {len(info.episodes)} 集，新增 {new_count} 集", "done")
-        return jsonify({
-            "ok": True,
-            "count": len(info.episodes),
-            "new_count": new_count,
-            "new_eids": new_eids,
-            "podcast_name": updated_name,
-        })
-    except Exception as e:
-        addLog(f"[错误] 刷新失败: {e}", "err")
-        return jsonify({"ok": False, "error": str(e)})
+    result = refresh_podcast(podcast_id)
+    if result["ok"]:
+        return jsonify(result)
+    return jsonify(result)
 
 
 @episodes_bp.route("/episode/retry/<int:episode_id>", methods=["POST"])

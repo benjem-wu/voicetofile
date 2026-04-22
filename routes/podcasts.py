@@ -6,10 +6,9 @@ import os
 from flask import Blueprint, request, jsonify
 
 import db
-import scraper
-from _utils import format_duration
 import worker as w
-from scraper import fetch_episodes_audio_info
+from _utils import format_duration
+from services import subscribe_podcast
 
 podcasts_bp = Blueprint("podcasts", __name__, url_prefix="/api/podcast")
 
@@ -20,75 +19,14 @@ def api_fetch_podcast():
     模式A：从 URL 或 PID 获取播客信息
     POST body: {"url": "..."} 或 {"pid": "..."}
     """
-    from sse import addLog
-    import config
-
     data = request.get_json()
     url = data.get("url", "").strip()
     pid = data.get("pid", "").strip()
 
-    if not pid:
-        pid = scraper.extract_pid(url)
-    if not pid:
-        return jsonify({"ok": False, "error": "无法从 URL 提取 PID"})
-
-    addLog(f"[播客] 正在获取: {pid}", "tag")
-
-    try:
-        info = scraper.fetch_podcast_info(pid, interval=config.COOKIE_INTERVAL)
-        addLog(f"[播客] 名称: {info.name}，共 {len(info.episodes)} 集，正在验证音频...", "done")
-
-        episodes_with_audio = fetch_episodes_audio_info(info.episodes)
-        valid_episodes = [ep for ep in episodes_with_audio if ep["has_audio"]]
-        skipped = len(info.episodes) - len(valid_episodes)
-        if skipped > 0:
-            addLog(f"[播客] 跳过 {skipped} 集（无音频，占位集）", "done")
-
-        podcast_id = db.add_podcast(pid, info.name)
-
-        # 存储播客详情（作者/订阅数/封面/简介）
-        if info.author or info.subscriber_count:
-            db.upsert_podcast_details(
-                podcast_id=podcast_id,
-                author=info.author,
-                description=info.description,
-                cover_url=info.cover_url,
-                subscriber_count=info.subscriber_count,
-                episode_count=info.episode_count,
-            )
-
-        ep_records = [{
-            "podcast_id": podcast_id,
-            "eid": ep["eid"],
-            "name": ep["name"],
-            "pub_date": ep["pub_date"],
-            "duration": ep["duration"],
-            "is_paid": ep["is_paid"],
-        } for ep in valid_episodes]
-        db.add_episodes(ep_records)
-
-        return jsonify({
-            "ok": True,
-            "podcast_id": podcast_id,
-            "pid": pid,
-            "name": info.name,
-            "episodes": [
-                {
-                    "eid": ep["eid"],
-                    "name": ep["name"],
-                    "pub_date": ep["pub_date"][:10] if ep["pub_date"] else "",
-                    "duration": ep["duration"],
-                    "duration_str": format_duration(ep["duration"]),
-                    "is_paid": ep["is_paid"],
-                    "paid_price": ep.get("paid_price"),
-                    "description": ep.get("description", "")[:100],
-                }
-                for ep in valid_episodes
-            ]
-        })
-    except Exception as e:
-        addLog(f"[错误] 获取失败: {e}", "err")
-        return jsonify({"ok": False, "error": str(e)})
+    result = subscribe_podcast(url, pid)
+    if result["ok"]:
+        return jsonify(result)
+    return jsonify(result)
 
 
 @podcasts_bp.route("/delete", methods=["POST"])
