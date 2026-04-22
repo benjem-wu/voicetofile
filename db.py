@@ -201,11 +201,20 @@ def get_podcast_by_pid(pid: str) -> Optional[dict]:
 
 
 def list_podcasts() -> list[dict]:
-    """列出所有已订阅播客，按添加时间倒序"""
+    """列出所有已订阅播客，按最新集时间倒序，精选播客置顶"""
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM podcasts ORDER BY added_at DESC")
+        cur.execute("""
+            SELECT p.*, MAX(e.pub_date) as latest_date
+            FROM podcasts p
+            LEFT JOIN episodes e ON e.podcast_id = p.id
+            GROUP BY p.id
+            ORDER BY
+                CASE WHEN p.pid = '__manual__' THEN 0 ELSE 1 END,
+                latest_date DESC,
+                p.added_at ASC
+        """)
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
