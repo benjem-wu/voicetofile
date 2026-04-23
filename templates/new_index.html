@@ -888,13 +888,25 @@
 <div id="toast"></div>
 
 <script>
-// ============ 单页保护 ============
+// ============ 单页保护（心跳版） ============
 const PAGE_KEY = 'vtf_page_active';
-if (localStorage.getItem(PAGE_KEY) === 'true') {
-  window.close();
+const HEARTBEAT_KEY = 'vtf_heartbeat';
+const HEARTBEAT_INTERVAL = 1000;
+const STALE_THRESHOLD = 3000;
+
+function isPrimaryTab() {
+  const lastBeat = parseInt(localStorage.getItem(HEARTBEAT_KEY) || '0', 10);
+  return Date.now() - lastBeat > STALE_THRESHOLD;
+}
+
+if (!isPrimaryTab()) {
   document.body.innerHTML = '<div style="text-align:center;padding:80px;font-size:16px;color:#666;">已有一个页面在运行，此页面已关闭。</div>';
 } else {
   localStorage.setItem(PAGE_KEY, 'true');
+  localStorage.setItem(HEARTBEAT_KEY, Date.now().toString());
+  setInterval(() => {
+    localStorage.setItem(HEARTBEAT_KEY, Date.now().toString());
+  }, HEARTBEAT_INTERVAL);
   window.addEventListener('beforeunload', () => localStorage.removeItem(PAGE_KEY));
 }
 
@@ -1587,21 +1599,21 @@ async function refreshAll() {
   try {
     const rows = document.querySelectorAll('.row-main[data-podcast]');
     const manualPodcastId = {{ manual_podcast_id }};
-    const promises = [];
+    const results = [];
     for (const row of rows) {
       const pid = parseInt(row.dataset.podcast);
       if (pid === manualPodcastId) continue;
-      promises.push(
-        fetch('/api/episodes/refresh', {
+      try {
+        const data = await fetch('/api/episodes/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ podcast_id: pid })
-        }).then(r => r.json()).then(data => ({ pid, data }))
-        .catch(e => ({ pid, data: { ok: false } }))
-      );
+        }).then(r => r.json());
+        results.push({ pid, data });
+      } catch (e) {
+        results.push({ pid, data: { ok: false } });
+      }
     }
-
-    const results = await Promise.all(promises);
 
     for (const { pid, data } of results) {
       if (data.ok && data.new_count > 0) {

@@ -73,6 +73,7 @@ def cleanup():
 <body>
 <script>
 localStorage.removeItem('vtf_page_active');
+localStorage.removeItem('vtf_heartbeat');
 location.href = '/';
 </script>
 </body>

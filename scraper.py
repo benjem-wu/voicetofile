@@ -468,7 +468,7 @@ def fetch_episode_info(eid: str, share_token: str = "", interval: int = DEFAULT_
     return get_scraper(interval=interval).fetch_episode_detail(eid, share_token=share_token)
 
 
-def fetch_episodes_audio_info(episodes: list, max_workers: int = 3) -> list[dict]:
+def fetch_episodes_audio_info(episodes: list, max_workers: int = 1) -> list[dict]:
     """
     并行验证一批 episode 的音频 URL 并获取真实时长。
     输入：PodcastInfo.episodes 列表（每个元素有 .eid .name .pub_date .is_paid 等属性）
