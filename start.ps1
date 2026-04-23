@@ -5,27 +5,13 @@ $PORT = 18990
 $PYTHON = "C:\Users\wule_\AppData\Local\Programs\Python\Python312\python.exe"
 $APPFILE = Join-Path $PSScriptRoot "app.py"
 $LOGFILE = Join-Path $PSScriptRoot "startup.log"
-$STARTUP_WAIT = 15  # 等待秒数
+$EDGE = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 function Write-Log($msg) {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$ts] $msg"
     Write-Host $line
     Add-Content -Path $LOGFILE -Value $line -Encoding UTF8
-}
-
-function Test-ServerReady($maxRetries = 20, $delay = 1) {
-    for ($i = 1; $i -le $maxRetries; $i++) {
-        try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$PORT/" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($response.StatusCode -eq 200) {
-                return $true
-            }
-        } catch {}
-        Write-Log "Waiting for server... ($i/$maxRetries)"
-        Start-Sleep -Seconds $delay
-    }
-    return $false
 }
 
 Write-Log "=== VoiceToFile Startup ==="
@@ -52,7 +38,6 @@ if (Test-Path $pidFile) { Remove-Item $pidFile -Force; Write-Log "Removed .voice
 Write-Log "[3/5] Checking Python..."
 if (-not (Test-Path $PYTHON)) {
     Write-Log "[ERROR] Python not found: $PYTHON"
-    Read-Host "Press Enter to exit"
     exit 1
 }
 Write-Log "Python OK: $PYTHON"
@@ -64,18 +49,23 @@ Write-Log "Started with PID=$($proc.Id)"
 
 # 5. Wait for server ready with health check
 Write-Log "[5/5] Waiting for server ready..."
-if (Test-ServerReady -maxRetries 30 -delay 1) {
-    Write-Log "Server ready! Opening browser..."
-    $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-    if (Test-Path $edgePath) {
-        Start-Process $edgePath -ArgumentList "--new-window","http://127.0.0.1:$PORT/"
-    } else {
-        Start-Process "http://127.0.0.1:$PORT/"
-    }
-    Write-Log "Done."
-} else {
-    Write-Log "[ERROR] Server failed to start within timeout."
-    Write-Log "Please check startup.log for errors."
-    Read-Host "Press Enter to exit"
-    exit 1
+$maxRetries = 30
+$delay = 1
+for ($i = 1; $i -le $maxRetries; $i++) {
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$PORT/" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($response.StatusCode -eq 200) {
+            Write-Log "Server ready!"
+            break
+        }
+    } catch {}
+    Write-Log "Waiting for server... ($i/$maxRetries)"
+    Start-Sleep -Seconds $delay
 }
+
+# Open browser using absolute path
+$url = "http://127.0.0.1:$PORT/"
+Write-Log "Opening browser: $url"
+Start-Process -FilePath $EDGE -ArgumentList "--new-window", $url
+
+Write-Log "Done."

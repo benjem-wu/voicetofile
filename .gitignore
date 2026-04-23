@@ -8,6 +8,8 @@ __pycache__/
 # 本地配置（不提交 Git）
 .cookie
 voicetofile.db
+.voicetofile.lock
+.voicetofile.pid
 
 # 临时文件
 *.tmp
