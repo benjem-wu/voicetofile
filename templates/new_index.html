@@ -430,6 +430,36 @@
   #toast.error { background: var(--red); }
   #toast.success { background: var(--green); }
 
+  /* ---- 刷新进度条 ---- */
+  #refresh-progress-wrap {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 1px solid #e9ecef;
+    font-size: 13px;
+    color: #555;
+  }
+  #refresh-progress-wrap.visible { display: flex; }
+  #progress-track {
+    flex: 1;
+    height: 6px;
+    background: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    min-width: 120px;
+  }
+  #progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #ff6b6b, #ee5a24);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+  #progress-text { color: #888; font-size: 12px; white-space: nowrap; }
+
   /* ---- 确认对话框 ---- */
   #confirm-dialog .dialog { width: 380px; }
   #confirm-dialog .dialog-footer { justify-content: center; gap: 12px; }
@@ -554,6 +584,11 @@
       <h2>📻 已订阅播客</h2>
       <span class="table-count">共 {{ podcasts|length }} 个播客</span>
       <button id="btn-delete-selected" disabled>🗑 删除</button>
+      <button id="btn-refresh-selected" class="btn btn-secondary btn-sm" onclick="refreshSelected()" style="display:none;">🔄 刷新选中 (0)</button>
+      <div id="refresh-progress-wrap">
+        <span id="progress-text">0 / 0</span>
+        <div id="progress-track"><div id="progress-fill"></div></div>
+      </div>
       <div style="margin-left: auto; display:flex; gap:8px; align-items:center; flex-shrink:0;">
         <button class="btn btn-secondary btn-sm" onclick="showSubDialog()">📡 订阅播客</button>
         <button class="btn btn-secondary btn-sm" onclick="showAddDialog()">➕ 手动添加</button>
@@ -1548,13 +1583,17 @@ async function deletePodcast(podcastId) {
 // ============ 删除选中 ============
 function updateDeleteBtn() {
   const checked = document.querySelectorAll('.podcast-check:checked');
-  const btn = document.getElementById('btn-delete-selected');
+  const deleteBtn = document.getElementById('btn-delete-selected');
+  const refreshBtn = document.getElementById('btn-refresh-selected');
   if (checked.length > 0) {
-    btn.disabled = false;
-    btn.classList.add('enabled');
+    deleteBtn.disabled = false;
+    deleteBtn.classList.add('enabled');
+    refreshBtn.style.display = '';
+    refreshBtn.textContent = '🔄 刷新选中 (' + checked.length + ')';
   } else {
-    btn.disabled = true;
-    btn.classList.remove('enabled');
+    deleteBtn.disabled = true;
+    deleteBtn.classList.remove('enabled');
+    refreshBtn.style.display = 'none';
   }
 }
 
@@ -1585,6 +1624,72 @@ async function confirmDelete() {
   location.reload();
 }
 
+// ============ 刷新选中 ============
+async function refreshSelected() {
+  const btnAll = document.getElementById('btn-refresh-all');
+  if (btnAll.classList.contains('loading')) return;
+
+  const checked = document.querySelectorAll('.podcast-check:checked');
+  if (checked.length === 0) return;
+
+  btnAll.classList.add('loading');
+  btnAll.innerHTML = '⏳ 刷新中...';
+  document.getElementById('btn-refresh-selected').style.display = 'none';
+
+  const total = checked.length;
+  window._refreshState = { done: 0, total, results: [] };
+  updateRefreshProgressBar(0, total);
+  document.getElementById('refresh-progress-wrap').classList.add('visible');
+
+  try {
+    for (const cb of checked) {
+      const pid = parseInt(cb.dataset.pid);
+      try {
+        await fetch('/api/episodes/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ podcast_id: pid })
+        });
+      } catch (e) {}
+    }
+
+    await new Promise(r => setTimeout(r, 500));
+
+    const s = window._refreshState;
+    const successDetails = s.results.filter(r => r.result === 'success');
+    const failedCount = s.results.filter(r => r.result === 'failed').length;
+    const totalNew = successDetails.reduce((sum, r) => sum + r.new_count, 0);
+    const details = s.results.map(r => ({
+      podcast_name: r.podcast_name,
+      result: r.result,
+      new_count: r.new_count,
+    }));
+
+    const newIdsResp = await fetch('/api/podcasts/new-ids');
+    const newIdsData = await newIdsResp.json();
+    const newIds = new Set(newIdsData.new_podcast_ids || []);
+    document.querySelectorAll('.row-main[data-podcast]').forEach(row => {
+      const pid = parseInt(row.dataset.podcast);
+      if (newIds.has(pid)) showBadge(pid);
+      else hideBadge(pid);
+    });
+
+    showRefreshSummaryModal({
+      total,
+      total_new_episodes: totalNew,
+      failed_count: failedCount,
+      details,
+    });
+  } catch (e) {
+    toast('刷新失败', 'error');
+  } finally {
+    btnAll.classList.remove('loading');
+    btnAll.innerHTML = '🔄 全部刷新';
+    updateDeleteBtn(); // 恢复刷新选中按钮状态
+    setTimeout(hideRefreshProgressBar, 3000);
+  }
+}
+
 // ============ 刷新全部 ============
 async function refreshAll() {
   const btn = document.getElementById('btn-refresh-all');
@@ -1593,61 +1698,64 @@ async function refreshAll() {
   btn.classList.add('loading');
   btn.innerHTML = '⏳ 刷新中...';
 
-  let totalNew = 0;
-  let updatedPodcasts = [];
+  // 重置刷新状态
+  const rows = document.querySelectorAll('.row-main[data-podcast]');
+  const manualPodcastId = {{ manual_podcast_id }};
+  const targetRows = [...rows].filter(r => parseInt(r.dataset.podcast) !== manualPodcastId);
+  const total = targetRows.length;
+
+  window._refreshState = { done: 0, total, results: [] };
+  updateRefreshProgressBar(0, total);
+  document.getElementById('refresh-progress-wrap').classList.add('visible');
 
   try {
-    const rows = document.querySelectorAll('.row-main[data-podcast]');
-    const manualPodcastId = {{ manual_podcast_id }};
-    const results = [];
-    for (const row of rows) {
+    for (const row of targetRows) {
       const pid = parseInt(row.dataset.podcast);
-      if (pid === manualPodcastId) continue;
       try {
-        const data = await fetch('/api/episodes/refresh', {
+        await fetch('/api/episodes/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ podcast_id: pid })
-        }).then(r => r.json());
-        results.push({ pid, data });
-      } catch (e) {
-        results.push({ pid, data: { ok: false } });
-      }
+        });
+      } catch (e) {}
     }
 
-    for (const { pid, data } of results) {
-      if (data.ok && data.new_count > 0) {
-        totalNew += data.new_count;
-        updatedPodcasts.push({ name: data.podcast_name, newCount: data.new_count, pid });
-      }
-    }
+    // 等最后一个 SSE 事件到达，再弹汇总（延迟 500ms 确保收到）
+    await new Promise(r => setTimeout(r, 500));
 
-    // 从 DB 获取当前有 is_new 标记的播客列表，更新红点显示
+    // 汇总
+    const s = window._refreshState;
+    const successDetails = s.results.filter(r => r.result === 'success');
+    const failedCount = s.results.filter(r => r.result === 'failed').length;
+    const totalNew = successDetails.reduce((sum, r) => sum + r.new_count, 0);
+    const details = s.results.map(r => ({
+      podcast_name: r.podcast_name,
+      result: r.result,
+      new_count: r.new_count,
+    }));
+
+    // 更新红点
     const newIdsResp = await fetch('/api/podcasts/new-ids');
     const newIdsData = await newIdsResp.json();
     const newIds = new Set(newIdsData.new_podcast_ids || []);
-
-    // 刷新所有行的 badge 显示状态
     document.querySelectorAll('.row-main[data-podcast]').forEach(row => {
       const pid = parseInt(row.dataset.podcast);
-      if (newIds.has(pid)) {
-        showBadge(pid);
-      } else {
-        hideBadge(pid);
-      }
+      if (newIds.has(pid)) showBadge(pid);
+      else hideBadge(pid);
     });
 
-    if (totalNew > 0) {
-      const lines = updatedPodcasts.map(p => `• ${p.name} 新增 ${p.newCount} 集`).join('\n');
-      toast(`🎉 ${updatedPodcasts.length} 个播客更新，共 ${totalNew} 条新集\n${lines}`, 'success');
-    } else {
-      toast('刷新完成，暂无更新', 'info');
-    }
+    showRefreshSummaryModal({
+      total,
+      total_new_episodes: totalNew,
+      failed_count: failedCount,
+      details,
+    });
   } catch (e) {
     toast('刷新失败', 'error');
   } finally {
     btn.classList.remove('loading');
     btn.innerHTML = '🔄 全部刷新';
+    setTimeout(hideRefreshProgressBar, 3000);
   }
 }
 
@@ -2055,6 +2163,89 @@ homeEvtSource.addEventListener('task_new', (e) => {
   }
   updateTicker(window._tickerTasks);
 });
+
+// ============ 刷新全部进度（实时 SSE） ============
+homeEvtSource.addEventListener('podcast_refresh_done', (e) => {
+  const d = JSON.parse(e.data);
+  window._refreshState = window._refreshState || { done: 0, total: 0, results: [] };
+  window._refreshState.done++;
+  window._refreshState.results.push(d);
+  updateRefreshProgressBar(window._refreshState.done, window._refreshState.total);
+  handlePodcastRefreshDone(d);
+});
+
+homeEvtSource.addEventListener('refresh_all_complete', (e) => {
+  const d = JSON.parse(e.data);
+  showRefreshSummaryModal(d);
+  hideRefreshProgressBar();
+});
+
+function updateRefreshProgressBar(done, total) {
+  const wrap = document.getElementById('refresh-progress-wrap');
+  const fill = document.getElementById('progress-fill');
+  const text = document.getElementById('progress-text');
+  if (!wrap || !fill || !text) return;
+  if (total > 0) {
+    wrap.classList.add('visible');
+    fill.style.width = (done / total * 100) + '%';
+    text.textContent = done + ' / ' + total;
+  }
+}
+
+function hideRefreshProgressBar() {
+  const wrap = document.getElementById('refresh-progress-wrap');
+  if (wrap) wrap.classList.remove('visible');
+  const fill = document.getElementById('progress-fill');
+  if (fill) fill.style.width = '0%';
+}
+
+function handlePodcastRefreshDone(d) {
+  const cooldown = window._toastCooldown = window._toastCooldown || {};
+  const key = d.podcast_name;
+  const now = Date.now();
+  if (cooldown[key] && now - cooldown[key] < 5000) return;
+  cooldown[key] = now;
+
+  let msg, type;
+  if (d.result === 'success') {
+    msg = '🎉 ' + d.podcast_name + ' 新增 ' + d.new_count + ' 集';
+    type = 'success';
+  } else if (d.result === 'no_update') {
+    msg = '✅ ' + d.podcast_name + ' 暂无更新';
+    type = 'info';
+  } else {
+    msg = '❌ ' + d.podcast_name + ' 刷新失败: ' + (d.error || '');
+    type = 'error';
+  }
+  toast(msg, type);
+}
+
+function showRefreshSummaryModal(d) {
+  const rows = (d.details || []).map(item => {
+    if (item.result === 'success') return '• ' + item.podcast_name + ' 新增 ' + item.new_count + ' 集';
+    if (item.result === 'no_update') return '• ' + item.podcast_name + ' 暂无更新';
+    return '• ' + item.podcast_name + ' 刷新失败';
+  }).join('\n');
+
+  const totalLines = rows ? '\n\n' + rows : '';
+  const summary = '共扫描 ' + d.total + ' 个播客，新增 ' + d.total_new_episodes + ' 集，失败 ' + d.failed_count + ' 个' + totalLines;
+
+  // 用项目统一的 dialog-overlay 系统（居中 + 遮罩）
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay show';
+  overlay.style.cssText = 'align-items:center; justify-content:center;';
+  overlay.innerHTML = `
+    <div class="dialog" style="max-width:420px;">
+      <h3 style="margin:0 0 16px 0; font-size:16px;">✅ 刷新完成</h3>
+      <p style="margin:0 0 8px 0; font-size:13px; color:var(--text-secondary); white-space:pre-line;">${summary}</p>
+      <div style="display:flex; justify-content:flex-end; margin-top:16px;">
+        <button class="btn btn-primary" onclick="this.closest('.dialog-overlay').classList.remove('show'); this.closest('.dialog-overlay').remove();">确定</button>
+      </div>
+    </div>
+  `;
+  overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.classList.remove('show'); overlay.remove(); } });
+  document.body.appendChild(overlay);
+}
 
 // 初始加载队列
 loadQueue();

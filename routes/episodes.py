@@ -128,8 +128,35 @@ def api_refresh_episodes():
     podcast_id = int(data["podcast_id"])
 
     result = refresh_podcast(podcast_id)
+
+    # 广播刷新进度（供前端实时显示）
+    podcast_name = result.get("podcast_name", "")
     if result["ok"]:
-        return jsonify(result)
+        if result.get("new_count", 0) > 0:
+            broadcast_sse("podcast_refresh_done", {
+                "type": "podcast_refresh_done",
+                "podcast_id": podcast_id,
+                "podcast_name": podcast_name,
+                "result": "success",
+                "new_count": result.get("new_count", 0),
+            })
+        else:
+            broadcast_sse("podcast_refresh_done", {
+                "type": "podcast_refresh_done",
+                "podcast_id": podcast_id,
+                "podcast_name": podcast_name,
+                "result": "no_update",
+                "new_count": 0,
+            })
+    else:
+        broadcast_sse("podcast_refresh_done", {
+            "type": "podcast_refresh_done",
+            "podcast_id": podcast_id,
+            "podcast_name": podcast_name,
+            "result": "failed",
+            "error": result.get("error", "未知错误"),
+        })
+
     return jsonify(result)
 
 
