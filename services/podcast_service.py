@@ -141,26 +141,20 @@ def refresh_podcast(podcast_id: int) -> dict:
         ).fetchall()
     }
 
-    # 3. 遍历网络 episode，处理 eid 漂移
-    #    规则：
-    #    - 如果 eid 不在 DB → 新增
-    #    - 如果 eid 在 DB 但对应的 name 变了 → eid 被平台分配给了别的 episode，跳过（不入库）
-    #    - 如果 name 在 DB 但 eid 变了 → 该 episode 的 eid 被换到了新地方，更新 eid
-    #    - 如果 eid 和 name 都在 DB → 已有，跳过
+    # 3. 处理 eid 漂移（立即提交，避免被后面 add_episodes 异常打断）
+    #    注意：existing_by_name 是 dict，同名 episode 只能保留一条
+    #    因此同一 name 有多条时，只更新 id 最小的那条（入库最早的）
     new_eps = []
     updated_eid_count = 0
     skipped_eid_conflict = 0
 
     for ep in info.episodes:
         if ep.eid in existing_by_eid:
-            # eid 已在 DB，检查 name 是否一致
             stored_name = existing_by_eid[ep.eid]["name"]
             if stored_name != ep.name:
-                # eid 被分配给了不同的 episode，跳过（不入库也不更新）
                 skipped_eid_conflict += 1
                 addLog(f"[刷新] eid {ep.eid[:12]}... 被分配给了「{ep.name[:20]}」，原有「{stored_name[:20]}」，跳过", "done")
         elif ep.name in existing_by_name:
-            # name 已在 DB，但 eid 变了 → 更新该 episode 的 eid
             old_record = existing_by_name[ep.name]
             conn.execute(
                 "UPDATE episodes SET eid = ?, pub_date = ?, duration = ? WHERE id = ?",
@@ -175,7 +169,15 @@ def refresh_podcast(podcast_id: int) -> dict:
         conn.commit()
     addLog(f"[刷新] 网络 {len(info.episodes)} 集，已有 {len(existing_by_eid)} 集，新增 {len(new_eps)} 集，更新 eid {updated_eid_count} 集，跳过 eid 冲突 {skipped_eid_conflict} 集", "done")
 
-    # 3. 只对新增集验证音频
+    # 4. 重新构建 existing_by_name（更新后的 eid 需要同步到查找表）
+    existing_by_name = {
+        row["name"]: {"id": row["id"], "eid": row["eid"]}
+        for row in conn.execute(
+            "SELECT id, eid, name FROM episodes WHERE podcast_id = ? AND discarded = 0", (podcast_id,)
+        ).fetchall()
+    }
+
+    # 5. 只对新增集验证音频
     if new_eps:
         from scraper import fetch_episodes_audio_info
         episodes_with_audio = fetch_episodes_audio_info(new_eps)
@@ -186,16 +188,14 @@ def refresh_podcast(podcast_id: int) -> dict:
     else:
         valid_episodes = []
 
-    # 4. 写入所有集（INSERT OR IGNORE，新集入库）
-    all_ep_records = []
+    # 4. 写入新增集（占位集过滤）
     podcast_name = info.name
-    # 新增集：用 fetch 后的详细数据
+    ep_records = []
     for ep in valid_episodes:
-        # 过滤占位集：episode name 等于 podcast name（如"张小珺Jùn｜商业访谈录"）
         if ep["name"] == podcast_name:
             addLog(f"[过滤] 跳过占位集: {ep['name'][:30]}", "done")
             continue
-        all_ep_records.append({
+        ep_records.append({
             "podcast_id": podcast_id,
             "eid": ep["eid"],
             "name": ep["name"],
@@ -203,36 +203,18 @@ def refresh_podcast(podcast_id: int) -> dict:
             "duration": ep["duration"],
             "is_paid": ep["is_paid"],
         })
-    # 已有集：用播客页面的元数据（可能标题/日期有变化）
-    for ep in old_eps:
-        if ep.name == podcast_name:
-            continue
-        all_ep_records.append({
-            "podcast_id": podcast_id,
-            "eid": ep.eid,
-            "name": ep.name,
-            "pub_date": ep.pub_date,
-            "duration": "",
-            "is_paid": ep.is_paid,
-        })
+    if ep_records:
+        db.add_episodes(ep_records)
 
-    if all_ep_records:
-        db.add_episodes(all_ep_records)
-
-    # 5. 更新已有集的时长（新增集如果在 fetch 时拿到了时长也要更新）
-    for ep in valid_episodes:
-        if ep["eid"] in existing_eids and ep["duration"]:
-            conn.execute(
-                "UPDATE episodes SET duration = ? WHERE podcast_id = ? AND eid = ? AND duration != ?",
-                (ep["duration"], podcast_id, ep["eid"], ep["duration"])
-            )
-    # 已有集（未 fetch）的时长：如果播客页面有，用播客页面的（但不从详情页 fetch）
-    for ep in old_eps:
-        if ep.duration:
-            conn.execute(
-                "UPDATE episodes SET duration = ? WHERE podcast_id = ? AND eid = ? AND (duration = '' OR duration IS NULL)",
-                (ep.duration, podcast_id, ep.eid)
-            )
+    # 5. 更新已有集的 pub_date 和 duration（已有集通过步骤1的 name 匹配更新了 eid，这里补全元数据）
+    for ep in info.episodes:
+        if ep.eid in existing_by_eid:
+            stored_name = existing_by_eid[ep.eid]["name"]
+            if stored_name == ep.name and (ep.pub_date or ep.duration):
+                conn.execute(
+                    "UPDATE episodes SET pub_date = COALESCE(NULLIF(pub_date, ''), ?), duration = COALESCE(NULLIF(duration, ''), ?) WHERE podcast_id = ? AND eid = ?",
+                    (ep.pub_date or '', ep.duration or '', podcast_id, ep.eid)
+                )
     conn.commit()
 
     # 6. 同步已有 episode 的文件状态：txt 文件存在但 status 非 done_deleted → 修正

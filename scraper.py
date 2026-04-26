@@ -550,8 +550,8 @@ def fetch_episodes_audio_info(episodes: list, max_workers: int = 1) -> list[dict
     def fetch_one(ep):
         detail = fetch_episode_info(ep.eid, interval=1)
         return {
-            "eid": ep.eid,
-            "name": ep.name,
+            "eid": detail.eid,  # 用单集页面的真实 eid（列表 eid 可能是漂移的）
+            "name": ep.name,   # 保留列表的名称格式
             "pub_date": ep.pub_date,
             "duration": detail.duration,
             "is_paid": ep.is_paid,
