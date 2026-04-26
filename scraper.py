@@ -377,24 +377,91 @@ class Scraper:
             episodes=episodes,
         )
 
+    def _extract_build_id(self, html: str) -> Optional[str]:
+        """从页面 HTML 中提取 buildId"""
+        m = re.search(r'"buildId"\s*:\s*"([^"]+)"', html)
+        return m.group(1) if m else None
+
+    def _extract_audio_url_from_html(self, html: str) -> Optional[str]:
+        """从 episode HTML 页面中直接提取音频 URL（media.xyzcdn.net）"""
+        # 匹配 https://media.xyzcdn.net/{pid}/{audio_id}.m4a 或类似格式
+        m = re.search(r'https?://media\.xyzcdn\.net/([a-f0-9]+)/([^\s"\'<>:]+)', html)
+        if m:
+            return f"https://media.xyzcdn.net/{m.group(1)}/{m.group(2)}"
+        return None
+
     def fetch_episode_detail(self, eid: str, share_token: str = "") -> EpisodeInfo:
         """获取单集音频 URL"""
-        data_url = EPISODE_DATA_URL.format(eid=eid)
-        try:
-            resp = self.get(data_url)
-            if resp.status_code == 200:
-                j = resp.json()
-                ep_data = j.get("pageProps", {}).get("episodeDetail", {})
-                if ep_data:
-                    return self._parse_episode(ep_data)
-        except Exception as e:
-            logger.debug(f"JSON 接口失败: {e}")
-
         page_url = EPISODE_PAGE_URL.format(eid=eid)
         if share_token:
             page_url += f"?s={share_token}"
+
         html = self.get_with_fallback(page_url)
 
+        # 优先从 HTML 直接提取音频 URL（最可靠）
+        audio_url = self._extract_audio_url_from_html(html)
+        if audio_url:
+            # 从 URL 中提取 podcast_id
+            pid = ""
+            m = re.search(r"media\.xyzcdn\.net/([a-f0-9]+)/", audio_url)
+            if m:
+                pid = m.group(1)
+            # 从 HTML 的 __NEXT_DATA__ 或 JSON-LD 提取其他信息
+            name, pub_date, desc, duration = "", "", "", ""
+            nm = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+            if nm:
+                try:
+                    data = json.loads(nm.group(1).strip())
+                    ep_data = data.get("props", {}).get("pageProps", {}).get("episodeDetail", {})
+                    if ep_data:
+                        name = ep_data.get("name") or ep_data.get("title") or ""
+                        pub_date = ep_data.get("datePublished") or ep_data.get("pubDate") or ""
+                        duration = ep_data.get("timeRequired") or ep_data.get("duration") or ""
+                        desc = ep_data.get("description") or ""
+                except Exception:
+                    pass
+            if not desc:
+                for m in re.finditer(
+                    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+                    html, re.DOTALL
+                ):
+                    try:
+                        data = json.loads(m.group(1).strip())
+                        if data.get("@type") == "PodcastEpisode":
+                            desc = data.get("description") or ""
+                            duration = data.get("timeRequired") or data.get("duration") or ""
+                            break
+                    except Exception:
+                        continue
+            is_paid = is_paid_episode(desc)
+            paid_price = extract_paid_price(desc) if is_paid else None
+            return EpisodeInfo(
+                eid=eid,
+                name=name,
+                pub_date=pub_date,
+                duration=duration,
+                description=desc,
+                is_paid=is_paid,
+                paid_price=paid_price,
+                audio_url=audio_url,
+                pid=pid,
+            )
+
+        # Fallback：尝试 JSON 接口（用动态 buildId）
+        build_id = self._extract_build_id(html)
+        if build_id:
+            data_url = f"https://www.xiaoyuzhoufm.com/_next/data/{build_id}/episode/{eid}.json"
+            try:
+                resp = requests.get(data_url, headers=self._hdrs(), timeout=20)
+                if resp.status_code == 200:
+                    j = resp.json()
+                    ep_data = j.get("pageProps", {}).get("episodeDetail", {})
+                    if ep_data:
+                        return self._parse_episode(ep_data)
+            except Exception as e:
+                logger.debug(f"JSON 接口失败: {e}")
+
+        # 最终 Fallback：从 HTML 的 JSON-LD 中提取
         for m in re.finditer(
             r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
             html, re.DOTALL
