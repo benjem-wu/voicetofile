@@ -150,8 +150,13 @@ def refresh_podcast(podcast_id: int) -> dict:
 
     # 4. 写入所有集（INSERT OR IGNORE，新集入库）
     all_ep_records = []
+    podcast_name = info.name
     # 新增集：用 fetch 后的详细数据
     for ep in valid_episodes:
+        # 过滤占位集：episode name 等于 podcast name（如"张小珺Jùn｜商业访谈录"）
+        if ep["name"] == podcast_name:
+            addLog(f"[过滤] 跳过占位集: {ep['name'][:30]}", "done")
+            continue
         all_ep_records.append({
             "podcast_id": podcast_id,
             "eid": ep["eid"],
@@ -162,6 +167,8 @@ def refresh_podcast(podcast_id: int) -> dict:
         })
     # 已有集：用播客页面的元数据（可能标题/日期有变化）
     for ep in old_eps:
+        if ep.name == podcast_name:
+            continue
         all_ep_records.append({
             "podcast_id": podcast_id,
             "eid": ep.eid,
