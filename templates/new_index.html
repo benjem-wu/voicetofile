@@ -1685,6 +1685,8 @@ async function refreshSelected() {
   } finally {
     btnAll.classList.remove('loading');
     btnAll.innerHTML = '🔄 全部刷新';
+    // 清除所有复选框选中状态
+    document.querySelectorAll('.podcast-check:checked').forEach(cb => cb.checked = false);
     updateDeleteBtn(); // 恢复刷新选中按钮状态
     setTimeout(hideRefreshProgressBar, 3000);
   }
@@ -1755,6 +1757,8 @@ async function refreshAll() {
   } finally {
     btn.classList.remove('loading');
     btn.innerHTML = '🔄 全部刷新';
+    document.querySelectorAll('.podcast-check:checked').forEach(cb => cb.checked = false);
+    updateDeleteBtn();
     setTimeout(hideRefreshProgressBar, 3000);
   }
 }
