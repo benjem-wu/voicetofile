@@ -124,18 +124,56 @@ def refresh_podcast(podcast_id: int) -> dict:
 
     conn = db.get_conn()
 
-    # 1. 先查 DB 已有的 eid（在发请求之前）
-    existing_eids = set(
-        row["eid"] for row in conn.execute(
-            "SELECT eid FROM episodes WHERE podcast_id = ?", (podcast_id,)
+    # 1. 查 DB 已有 episode：eid -> episode（用于检测 eid 漂移）
+    existing_by_eid = {  # eid -> {id, name}
+        row["eid"]: {"id": row["id"], "name": row["name"]}
+        for row in conn.execute(
+            "SELECT id, eid, name FROM episodes WHERE podcast_id = ? AND discarded = 0", (podcast_id,)
         ).fetchall()
-    )
+    }
+    existing_eids = set(existing_by_eid.keys())
 
-    # 2. 分离新增集和已有集
-    new_eps = [ep for ep in info.episodes if ep.eid not in existing_eids]
-    old_eps = [ep for ep in info.episodes if ep.eid in existing_eids]
+    # 2. 查 DB 已有 episode：name -> episode（用于检测 name 漂移）
+    existing_by_name = {
+        row["name"]: {"id": row["id"], "eid": row["eid"]}
+        for row in conn.execute(
+            "SELECT id, eid, name FROM episodes WHERE podcast_id = ? AND discarded = 0", (podcast_id,)
+        ).fetchall()
+    }
 
-    addLog(f"[刷新] 网络 {len(info.episodes)} 集，已有 {len(existing_eids)} 集，新增 {len(new_eps)} 集", "done")
+    # 3. 遍历网络 episode，处理 eid 漂移
+    #    规则：
+    #    - 如果 eid 不在 DB → 新增
+    #    - 如果 eid 在 DB 但对应的 name 变了 → eid 被平台分配给了别的 episode，跳过（不入库）
+    #    - 如果 name 在 DB 但 eid 变了 → 该 episode 的 eid 被换到了新地方，更新 eid
+    #    - 如果 eid 和 name 都在 DB → 已有，跳过
+    new_eps = []
+    updated_eid_count = 0
+    skipped_eid_conflict = 0
+
+    for ep in info.episodes:
+        if ep.eid in existing_by_eid:
+            # eid 已在 DB，检查 name 是否一致
+            stored_name = existing_by_eid[ep.eid]["name"]
+            if stored_name != ep.name:
+                # eid 被分配给了不同的 episode，跳过（不入库也不更新）
+                skipped_eid_conflict += 1
+                addLog(f"[刷新] eid {ep.eid[:12]}... 被分配给了「{ep.name[:20]}」，原有「{stored_name[:20]}」，跳过", "done")
+        elif ep.name in existing_by_name:
+            # name 已在 DB，但 eid 变了 → 更新该 episode 的 eid
+            old_record = existing_by_name[ep.name]
+            conn.execute(
+                "UPDATE episodes SET eid = ?, pub_date = ?, duration = ? WHERE id = ?",
+                (ep.eid, ep.pub_date, ep.duration, old_record["id"])
+            )
+            updated_eid_count += 1
+            addLog(f"[刷新] 更新 episode eid：{ep.name[:20]} ({old_record['eid'][:12]} -> {ep.eid[:12]})", "done")
+        else:
+            new_eps.append(ep)
+
+    if updated_eid_count > 0:
+        conn.commit()
+    addLog(f"[刷新] 网络 {len(info.episodes)} 集，已有 {len(existing_by_eid)} 集，新增 {len(new_eps)} 集，更新 eid {updated_eid_count} 集，跳过 eid 冲突 {skipped_eid_conflict} 集", "done")
 
     # 3. 只对新增集验证音频
     if new_eps:
