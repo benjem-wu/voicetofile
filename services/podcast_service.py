@@ -182,6 +182,13 @@ def refresh_podcast(podcast_id: int) -> dict:
     if new_eids:
         db.mark_episodes_new(podcast_id, new_eids)
 
+    # 刷新后更新 added_at，让播客升到列表顶部
+    conn.execute(
+        "UPDATE podcasts SET added_at = ? WHERE id = ?",
+        (datetime.now().isoformat(), podcast_id)
+    )
+    conn.commit()
+
     addLog(f"[刷新] 完成，共 {len(info.episodes)} 集，新增 {new_count} 集", "done")
     return {
         "ok": True,
@@ -190,3 +197,80 @@ def refresh_podcast(podcast_id: int) -> dict:
         "new_eids": new_eids,
         "podcast_name": updated_name,
     }
+
+
+def delete_podcast(podcast_id: int) -> dict:
+    """删除播客订阅及其所有 episodes。"""
+    db.delete_podcast(podcast_id)
+    return {"ok": True}
+
+
+def get_podcast_episodes(podcast_id: int) -> dict:
+    """
+    获取播客详情及其 episode 列表（含文件存在性检查）。
+
+    返回 dict：
+      - ok: bool
+      - podcast: dict
+      - episodes: list[dict]
+      - error: str（ok=False 时）
+    """
+    from _utils import format_duration
+
+    conn = db.get_conn()
+    try:
+        podcast = conn.execute(
+            "SELECT * FROM podcasts WHERE id = ?", (podcast_id,)
+        ).fetchone()
+        if not podcast:
+            return {"ok": False, "error": "播客不存在"}
+
+        db.sync_podcast_episodes_status(podcast_id)
+        episodes = db.list_episodes_by_podcast(podcast_id)
+
+        return {
+            "ok": True,
+            "podcast": dict(podcast),
+            "episodes": [
+                {
+                    "id": e["id"],
+                    "eid": e["eid"],
+                    "name": e["name"],
+                    "pub_date": e["pub_date"],
+                    "duration": e["duration"],
+                    "duration_str": format_duration(e["duration"]) if e["duration"] else "",
+                    "is_paid": e["is_paid"],
+                    "status": e["status"],
+                    "txt_path": e["txt_path"],
+                    "txt_exists": os.path.exists(e["txt_path"]) if e["txt_path"] else False,
+                }
+                for e in episodes
+            ],
+        }
+    finally:
+        conn.close()
+
+
+def open_podcast_folder(podcast_id: int) -> dict:
+    """打开播客输出文件夹。"""
+    conn = db.get_conn()
+    try:
+        p = conn.execute("SELECT * FROM podcasts WHERE id = ?", (podcast_id,)).fetchone()
+        if not p:
+            return {"ok": False, "error": "播客不存在"}
+        folder = w.get_output_dir(p["name"])
+        if not folder.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(folder)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def mark_podcast_viewed(podcast_id: int) -> dict:
+    """用户展开播客后，清除该播客的新集标记。"""
+    db.mark_podcast_viewed(podcast_id)
+    return {"ok": True}

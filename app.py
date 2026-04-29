@@ -169,6 +169,8 @@ def index():
             "latest_pub_date": latest_pub,
         })
 
+    podcasts.sort(key=lambda p: p["latest_pub_date"] or "", reverse=True)
+
     if manual_podcast:
         podcasts.insert(0, manual_podcast)
         manual_podcast_id = db.get_or_create_manual_podcast()
