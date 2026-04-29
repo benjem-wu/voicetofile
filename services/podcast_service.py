@@ -10,7 +10,7 @@ import db
 import scraper
 import config
 from scraper import fetch_episode_info
-from sse import addLog, task_update
+from sse import addLog, task_update, broadcast_sse
 from _utils import get_txt_path
 
 
@@ -103,11 +103,16 @@ def refresh_podcast(podcast_id: int) -> dict:
     """
     p = db.get_conn().execute("SELECT * FROM podcasts WHERE id = ?", (podcast_id,)).fetchone()
     if not p:
+        broadcast_sse("podcast_refresh_done", {
+            "podcast_name": f"#{podcast_id}",
+            "new_count": 0, "result": "failed", "error": "播客不存在",
+        })
         return {"ok": False, "error": "播客不存在"}
     pid = p["pid"]
 
     info = scraper.fetch_podcast_info(pid, interval=config.COOKIE_INTERVAL)
 
+    updated_name = p["name"]
     if info.name:
         db.add_podcast(pid, info.name)
         updated_name = info.name
@@ -125,10 +130,11 @@ def refresh_podcast(podcast_id: int) -> dict:
     conn = db.get_conn()
 
     # 1. 查 DB 已有 episode：eid -> episode（用于检测 eid 漂移）
+    # 必须查所有行（含 discarded=1），否则废弃 episode 的 eid 被视为"新"，INSERT 会 UNIQUE 冲突
     existing_by_eid = {  # eid -> {id, name}
         row["eid"]: {"id": row["id"], "name": row["name"]}
         for row in conn.execute(
-            "SELECT id, eid, name FROM episodes WHERE podcast_id = ? AND discarded = 0", (podcast_id,)
+            "SELECT id, eid, name FROM episodes WHERE podcast_id = ?", (podcast_id,)
         ).fetchall()
     }
     existing_eids = set(existing_by_eid.keys())
@@ -137,7 +143,7 @@ def refresh_podcast(podcast_id: int) -> dict:
     existing_by_name = {
         row["name"]: {"id": row["id"], "eid": row["eid"]}
         for row in conn.execute(
-            "SELECT id, eid, name FROM episodes WHERE podcast_id = ? AND discarded = 0", (podcast_id,)
+            "SELECT id, eid, name FROM episodes WHERE podcast_id = ?", (podcast_id,)
         ).fetchall()
     }
 
@@ -173,7 +179,7 @@ def refresh_podcast(podcast_id: int) -> dict:
     existing_by_name = {
         row["name"]: {"id": row["id"], "eid": row["eid"]}
         for row in conn.execute(
-            "SELECT id, eid, name FROM episodes WHERE podcast_id = ? AND discarded = 0", (podcast_id,)
+            "SELECT id, eid, name FROM episodes WHERE podcast_id = ?", (podcast_id,)
         ).fetchall()
     }
 
@@ -253,6 +259,14 @@ def refresh_podcast(podcast_id: int) -> dict:
     conn.commit()
 
     addLog(f"[刷新] 完成，共 {len(info.episodes)} 集，新增 {new_count} 集", "done")
+
+    broadcast_sse("podcast_refresh_done", {
+        "podcast_name": updated_name,
+        "new_count": new_count,
+        "result": "success" if new_count > 0 else "no_update",
+        "error": None,
+    })
+
     return {
         "ok": True,
         "count": len(info.episodes),

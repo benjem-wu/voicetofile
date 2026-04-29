@@ -1636,59 +1636,23 @@ async function refreshSelected() {
   btnAll.innerHTML = '⏳ 刷新中...';
   document.getElementById('btn-refresh-selected').style.display = 'none';
 
-  const total = checked.length;
+  const podcast_ids = [...checked].map(cb => parseInt(cb.dataset.pid));
+  const total = podcast_ids.length;
+
   window._refreshState = { done: 0, total, results: [] };
   updateRefreshProgressBar(0, total);
   document.getElementById('refresh-progress-wrap').classList.add('visible');
 
   try {
-    for (const cb of checked) {
-      const pid = parseInt(cb.dataset.pid);
-      try {
-        await fetch('/api/episodes/refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ podcast_id: pid })
-        });
-      } catch (e) {}
-    }
-
-    await new Promise(r => setTimeout(r, 500));
-
-    const s = window._refreshState;
-    const successDetails = s.results.filter(r => r.result === 'success');
-    const failedCount = s.results.filter(r => r.result === 'failed').length;
-    const totalNew = successDetails.reduce((sum, r) => sum + r.new_count, 0);
-    const details = s.results.map(r => ({
-      podcast_name: r.podcast_name,
-      result: r.result,
-      new_count: r.new_count,
-    }));
-
-    const newIdsResp = await fetch('/api/podcasts/new-ids');
-    const newIdsData = await newIdsResp.json();
-    const newIds = new Set(newIdsData.new_podcast_ids || []);
-    document.querySelectorAll('.row-main[data-podcast]').forEach(row => {
-      const pid = parseInt(row.dataset.podcast);
-      if (newIds.has(pid)) showBadge(pid);
-      else hideBadge(pid);
+    const resp = await fetch('/api/episodes/refresh-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ podcast_ids })
     });
-
-    showRefreshSummaryModal({
-      total,
-      total_new_episodes: totalNew,
-      failed_count: failedCount,
-      details,
-    });
+    if (!resp.ok) throw new Error('请求失败');
   } catch (e) {
-    toast('刷新失败', 'error');
-  } finally {
-    btnAll.classList.remove('loading');
-    btnAll.innerHTML = '🔄 全部刷新';
-    // 清除所有复选框选中状态
-    document.querySelectorAll('.podcast-check:checked').forEach(cb => cb.checked = false);
-    updateDeleteBtn(); // 恢复刷新选中按钮状态
-    setTimeout(hideRefreshProgressBar, 3000);
+    toast('刷新请求失败', 'error');
+    resetRefreshUI();
   }
 }
 
@@ -1711,55 +1675,15 @@ async function refreshAll() {
   document.getElementById('refresh-progress-wrap').classList.add('visible');
 
   try {
-    for (const row of targetRows) {
-      const pid = parseInt(row.dataset.podcast);
-      try {
-        await fetch('/api/episodes/refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ podcast_id: pid })
-        });
-      } catch (e) {}
-    }
-
-    // 等最后一个 SSE 事件到达，再弹汇总（延迟 500ms 确保收到）
-    await new Promise(r => setTimeout(r, 500));
-
-    // 汇总
-    const s = window._refreshState;
-    const successDetails = s.results.filter(r => r.result === 'success');
-    const failedCount = s.results.filter(r => r.result === 'failed').length;
-    const totalNew = successDetails.reduce((sum, r) => sum + r.new_count, 0);
-    const details = s.results.map(r => ({
-      podcast_name: r.podcast_name,
-      result: r.result,
-      new_count: r.new_count,
-    }));
-
-    // 更新红点
-    const newIdsResp = await fetch('/api/podcasts/new-ids');
-    const newIdsData = await newIdsResp.json();
-    const newIds = new Set(newIdsData.new_podcast_ids || []);
-    document.querySelectorAll('.row-main[data-podcast]').forEach(row => {
-      const pid = parseInt(row.dataset.podcast);
-      if (newIds.has(pid)) showBadge(pid);
-      else hideBadge(pid);
+    const resp = await fetch('/api/episodes/refresh-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
     });
-
-    showRefreshSummaryModal({
-      total,
-      total_new_episodes: totalNew,
-      failed_count: failedCount,
-      details,
-    });
+    if (!resp.ok) throw new Error('请求失败');
   } catch (e) {
-    toast('刷新失败', 'error');
-  } finally {
-    btn.classList.remove('loading');
-    btn.innerHTML = '🔄 全部刷新';
-    document.querySelectorAll('.podcast-check:checked').forEach(cb => cb.checked = false);
-    updateDeleteBtn();
-    setTimeout(hideRefreshProgressBar, 3000);
+    toast('刷新请求失败', 'error');
+    resetRefreshUI();
   }
 }
 
@@ -2181,7 +2105,7 @@ homeEvtSource.addEventListener('podcast_refresh_done', (e) => {
 homeEvtSource.addEventListener('refresh_all_complete', (e) => {
   const d = JSON.parse(e.data);
   showRefreshSummaryModal(d);
-  hideRefreshProgressBar();
+  resetRefreshUI();
 });
 
 function updateRefreshProgressBar(done, total) {
@@ -2201,6 +2125,18 @@ function hideRefreshProgressBar() {
   if (wrap) wrap.classList.remove('visible');
   const fill = document.getElementById('progress-fill');
   if (fill) fill.style.width = '0%';
+}
+
+function resetRefreshUI() {
+  const btn = document.getElementById('btn-refresh-all');
+  if (btn) {
+    btn.classList.remove('loading');
+    btn.innerHTML = '🔄 全部刷新';
+  }
+  hideRefreshProgressBar();
+  document.querySelectorAll('.podcast-check:checked').forEach(cb => cb.checked = false);
+  updateDeleteBtn();
+  window._refreshState = { done: 0, total: 0, results: [] };
 }
 
 function handlePodcastRefreshDone(d) {

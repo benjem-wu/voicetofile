@@ -548,7 +548,10 @@ def fetch_episodes_audio_info(episodes: list, max_workers: int = 1) -> list[dict
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def fetch_one(ep):
-        detail = fetch_episode_info(ep.eid, interval=1)
+        # 每个线程用独立的 Scraper(interval=1) 实例做音频验证
+        # 不共享全局 _scraper（5 秒间隔），将间隔从 5 秒降到 1 秒
+        s = Scraper(interval=1)
+        detail = s.fetch_episode_detail(ep.eid)
         return {
             "eid": detail.eid,
             "name": ep.name,

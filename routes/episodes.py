@@ -4,12 +4,15 @@
 
 纯 HTTP 层：解析请求 → 调 service → 返回 JSON 响应。
 """
+import threading
 from flask import Blueprint, request, jsonify
 from services import (
     add_episode, enqueue_episodes, retry_episode, reenqueue_episode,
     open_episode_txt, dequeue_episode, pause_episode, reset_episode,
-    resume_episode, get_episode,
+    resume_episode, get_episode, refresh_podcast,
 )
+from sse import broadcast_sse, addLog
+import db
 
 episodes_bp = Blueprint("episodes", __name__, url_prefix="/api")
 
@@ -46,7 +49,6 @@ def api_refresh_episodes():
     """
     data = request.get_json()
     podcast_id = int(data["podcast_id"])
-    from services import refresh_podcast
     result = refresh_podcast(podcast_id)
     return jsonify(result)
 
@@ -107,3 +109,83 @@ def api_episode_resume(episode_id: int):
     """继续暂停的任务"""
     result = resume_episode(episode_id)
     return jsonify(result)
+
+
+# --------------- 批量刷新 ---------------
+
+@episodes_bp.route("/episodes/refresh-all", methods=["POST"])
+def api_refresh_all():
+    """
+    批量刷新所有播客（或指定播客列表）。
+    后台逐个刷新，通过 SSE 广播进度和结果。
+    POST body: {}（全部）或 {"podcast_ids": [1,2,3]}（选中）
+    """
+    data = request.get_json() or {}
+    podcast_ids = data.get("podcast_ids")
+
+    t = threading.Thread(target=_batch_refresh, args=(podcast_ids,), daemon=True)
+    t.start()
+    return jsonify({"ok": True})
+
+
+def _batch_refresh(podcast_ids=None):
+    """后台批量刷新任务：逐个处理、广播 SSE"""
+    addLog("[批量刷新] 开始", "tag")
+    conn = db.get_conn()
+    try:
+        if podcast_ids:
+            placeholders = ",".join("?" * len(podcast_ids))
+            rows = conn.execute(
+                f"SELECT id, name FROM podcasts WHERE id IN ({placeholders})",
+                podcast_ids,
+            ).fetchall()
+            addLog(f"[批量刷新] 选中 {len(rows)} 个播客", "done")
+        else:
+            rows = conn.execute(
+                "SELECT id, name FROM podcasts WHERE pid != ? ORDER BY added_at DESC",
+                (db.MANUAL_PID,),
+            ).fetchall()
+            addLog(f"[批量刷新] 全部共 {len(rows)} 个播客", "done")
+    except Exception as e:
+        addLog(f"[批量刷新] 查询播客列表失败: {e}", "tag")
+        return
+    finally:
+        conn.close()
+
+    total = len(rows)
+    details = []
+
+    for row in rows:
+        try:
+            result = refresh_podcast(row["id"])
+            # refresh_podcast 内部已广播 podcast_refresh_done SSE
+            details.append({
+                "podcast_name": row["name"],
+                "result": "success" if result.get("new_count", 0) > 0 else "no_update",
+                "new_count": result.get("new_count", 0),
+            })
+        except Exception as e:
+            broadcast_sse("podcast_refresh_done", {
+                "podcast_name": row["name"],
+                "new_count": 0,
+                "result": "failed",
+                "error": str(e),
+            })
+            details.append({
+                "podcast_name": row["name"],
+                "result": "failed",
+                "new_count": 0,
+            })
+
+    success_details = [d for d in details if d["result"] == "success"]
+    total_new = sum(d["new_count"] for d in success_details)
+    failed_count = sum(1 for d in details if d["result"] == "failed")
+
+    broadcast_sse("refresh_all_complete", {
+        "total": total,
+        "total_new_episodes": total_new,
+        "failed_count": failed_count,
+        "details": details,
+    })
+
+    addLog(f"[批量刷新] 完成: {total} 个播客, 新增 {total_new} 集, 失败 {failed_count} 个", "done")
