@@ -21,6 +21,16 @@ _download_result_*.json
 _transcribe_progress_*.txt
 _transcribe_result_*.json
 
+# 运行时文件
+.voicetofile.lock
+.voicetofile.pid
+
+# MCP 缓存
+.playwright-mcp/
+
+# Claude 配置
+.claude/
+
 # ffmpeg（从 b-site 共享）
 ffmpeg/
 

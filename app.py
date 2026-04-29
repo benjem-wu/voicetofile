@@ -133,12 +133,11 @@ def index():
         db.sync_podcast_episodes_status(p["id"])
 
     podcasts = []
-    manual_podcast_id = 0
+    manual_podcast = None
 
     for p in podcasts_raw:
         episodes = db.list_episodes_by_podcast(p["id"])
         if p["pid"] == db.MANUAL_PID:
-            manual_podcast_id = p["id"]
             total = len(episodes)
             done = sum(1 for e in episodes if e["status"] == "done_deleted")
             latest_pub = ""
@@ -146,12 +145,12 @@ def index():
                 if e["pub_date"]:
                     latest_pub = e["pub_date"]
                     break
-            podcasts.insert(0, {
+            manual_podcast = {
                 **p,
                 "total_episodes": total,
                 "done_episodes": done,
                 "latest_pub_date": latest_pub,
-            })
+            }
             continue
         sub_eps = [e for e in episodes if e.get("source") == "subscribe"]
         if not sub_eps:
@@ -170,6 +169,13 @@ def index():
             "latest_pub_date": latest_pub,
         })
 
+    podcasts.sort(key=lambda p: p["latest_pub_date"] or "", reverse=True)
+
+    if manual_podcast:
+        podcasts.insert(0, manual_podcast)
+        manual_podcast_id = db.get_or_create_manual_podcast()
+    else:
+        manual_podcast_id = 0
     new_podcast_ids = db.get_podcasts_with_new()
     return render_template(
         "new_index.html",
